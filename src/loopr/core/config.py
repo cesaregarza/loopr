@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(frozen=True)
 class DecayConfig:
     """Configuration for time decay calculations."""
 
@@ -25,7 +25,7 @@ class DecayConfig:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class PageRankConfig:
     """Configuration for PageRank algorithm."""
 
@@ -120,35 +120,6 @@ class ExposureLogOddsConfig:
     # Score transformation
     apply_log_transform: bool = True
     score_scale: float = 1.0
-
-
-@dataclass
-class PipelineConfig:
-    """Configuration for the full ranking pipeline."""
-
-    # Algorithm selection
-    algorithm: str = "tick_tock"  # "tick_tock" or "exposure_log_odds"
-
-    # Algorithm-specific configs
-    tick_tock: TickTockConfig = field(default_factory=TickTockConfig)
-    exposure_log_odds: ExposureLogOddsConfig = field(
-        default_factory=ExposureLogOddsConfig
-    )
-
-    # Post-processing
-    apply_grades: bool = True
-    grade_thresholds: list = field(
-        default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 0.9]
-    )
-
-    # Output options
-    include_diagnostics: bool = False
-    include_intermediate: bool = False
-
-    # Performance options
-    use_sparse: bool = True
-    parallel: bool = False
-    cache_results: bool = False
 
 
 def merge_configs(*configs: dict) -> dict:

@@ -6,9 +6,10 @@ for tournament influence updates, while exposure log-odds (or any other backend)
 provides the inner rating computation.
 """
 
+from __future__ import annotations
+
 import logging
 import time
-from typing import Dict, List, Optional
 
 import numpy as np
 import polars as pl
@@ -40,8 +41,8 @@ class TTLEngine:
 
     def __init__(
         self,
-        config: Optional[ExposureLogOddsConfig] = None,
-        backend: Optional[RatingBackend] = None,
+        config: ExposureLogOddsConfig | None = None,
+        backend: RatingBackend | None = None,
     ):
         """
         Initialize the TTL engine.
@@ -70,8 +71,8 @@ class TTLEngine:
         self.clock = Clock()
 
         # Storage
-        self.tournament_influence: Dict[int, float] = {}
-        self.last_result: Optional[ExposureLogOddsResult] = None
+        self.tournament_influence: dict[int, float] = {}
+        self.last_result: ExposureLogOddsResult | None = None
 
         # Damping factor for stability
         self.damping_mu = 0.5  # Can be configured
@@ -80,7 +81,7 @@ class TTLEngine:
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-        initial_influence: Optional[Dict[int, float]] = None,
+        initial_influence: Optional[dict[int, float]] = None,
     ) -> pl.DataFrame:
         """
         Rank players using TTL algorithm.
@@ -275,7 +276,6 @@ class TTLEngine:
         result_df = result_df.filter(pl.col("active"))
 
         elapsed = time.time() - start_time
-        self.logger.info(f"TTL ranking completed in {elapsed:.2f}s")
         self.logger.info("TTL ranking completed in %.2fs", elapsed)
 
         return result_df.sort("score", descending=True)
@@ -284,7 +284,7 @@ class TTLEngine:
         self,
         matches: pl.DataFrame,
         participants: pl.DataFrame,
-        initial_influence: Optional[Dict[int, float]] = None,
+        initial_influence: Optional[dict[int, float]] = None,
     ) -> pl.DataFrame:
         """Domain-agnostic wrapper returning `entity_id` rankings."""
         result = self.rank_players(matches, participants, initial_influence)
@@ -296,7 +296,7 @@ class TTLEngine:
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-    ) -> Dict[int, List]:
+    ) -> dict[int, list]:
         """Get mapping of tournament ID to participant IDs."""
         participants = (
             players.select(["tournament_id", "user_id"])
@@ -315,7 +315,7 @@ class TTLEngine:
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-        player_ids: List,
+        player_ids: list,
     ) -> np.ndarray:
         """Get last activity timestamp for each player."""
         # Simplified - would need proper implementation
@@ -325,7 +325,7 @@ class TTLEngine:
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-        player_ids: List,
+        player_ids: list,
     ) -> np.ndarray:
         """Compute number of matches for each player."""
         # Simplified - would need proper implementation

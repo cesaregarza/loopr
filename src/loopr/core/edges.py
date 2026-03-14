@@ -14,7 +14,98 @@ from loopr.schema import (
 )
 
 if TYPE_CHECKING:
-    from typing import Any, Dict, Tuple
+    from typing import Any
+
+
+def _prepare_weighted_matches(
+    matches: pl.DataFrame,
+    tournament_influence: dict[int, float],
+    now_timestamp: float,
+    decay_rate: float,
+    beta: float,
+    timestamp_column: str | None = None,
+) -> pl.DataFrame:
+    """Filter byes, resolve timestamps, join influence, compute weight column.
+
+    Args:
+        matches: Match data (already normalized).
+        tournament_influence: Tournament ID to influence mapping.
+        now_timestamp: Current timestamp.
+        decay_rate: Time decay rate.
+        beta: Tournament influence exponent.
+        timestamp_column: Optional explicit timestamp column name.
+
+    Returns:
+        Filtered match DataFrame with ``tournament_strength`` and
+        ``match_weight`` columns added.
+    """
+    if matches.is_empty():
+        return matches
+
+    filter_expression = (
+        pl.col("winner_team_id").is_not_null()
+        & pl.col("loser_team_id").is_not_null()
+    )
+
+    if "is_bye" in matches.columns:
+        filter_expression = filter_expression & ~pl.col("is_bye").fill_null(
+            False
+        )
+
+    match_data = matches.filter(filter_expression)
+
+    # Join tournament influence
+    if tournament_influence:
+        strength_dataframe = pl.DataFrame(
+            {
+                "tournament_id": list(tournament_influence.keys()),
+                "tournament_strength": list(tournament_influence.values()),
+            }
+        )
+        match_data = match_data.join(
+            strength_dataframe,
+            on="tournament_id",
+            how="left",
+            coalesce=True,
+        ).with_columns(pl.col("tournament_strength").fill_null(1.0))
+    else:
+        match_data = match_data.with_columns(
+            pl.lit(1.0).alias("tournament_strength")
+        )
+
+    # Resolve timestamp
+    if timestamp_column and timestamp_column in match_data.columns:
+        match_data = match_data.with_columns(
+            pl.col(timestamp_column).alias("ts")
+        )
+    else:
+        timestamp_expressions: list = []
+        if "last_game_finished_at" in match_data.columns:
+            timestamp_expressions.append(pl.col("last_game_finished_at"))
+        if "match_created_at" in match_data.columns:
+            timestamp_expressions.append(pl.col("match_created_at"))
+        timestamp_expressions.append(pl.lit(now_timestamp))
+        match_data = match_data.with_columns(
+            pl.coalesce(timestamp_expressions).alias("ts")
+        )
+
+    # Compute match weight
+    time_decay_factor = (
+        ((pl.lit(now_timestamp) - pl.col("ts").cast(pl.Float64)) / 86400.0)
+        .mul(-decay_rate)
+        .exp()
+    )
+
+    if beta == 0.0:
+        match_weight = time_decay_factor
+    else:
+        match_weight = time_decay_factor * (
+            pl.col("tournament_strength") ** beta
+        )
+
+    match_data = match_data.with_columns(match_weight.alias("match_weight"))
+
+    return match_data
 
 
 def build_player_edges(
@@ -65,69 +156,10 @@ def _build_player_edges_normalized(
     if matches.is_empty() or players.is_empty():
         return pl.DataFrame([])
 
-    if tournament_influence:
-        strength_dataframe = pl.DataFrame(
-            {
-                "tournament_id": list(tournament_influence.keys()),
-                "tournament_strength": list(tournament_influence.values()),
-            }
-        )
-    else:
-        strength_dataframe = None
-
-    filter_expression = (
-        pl.col("winner_team_id").is_not_null()
-        & pl.col("loser_team_id").is_not_null()
+    match_data = _prepare_weighted_matches(
+        matches, tournament_influence, now_timestamp, decay_rate, beta,
+        timestamp_column=timestamp_column,
     )
-
-    if "is_bye" in matches.columns:
-        filter_expression = filter_expression & ~pl.col("is_bye").fill_null(
-            False
-        )
-
-    match_data = matches.filter(filter_expression)
-
-    if strength_dataframe is not None:
-        match_data = match_data.join(
-            strength_dataframe,
-            on="tournament_id",
-            how="left",
-            coalesce=True,
-        ).fill_null(1.0)
-    else:
-        match_data = match_data.with_columns(
-            pl.lit(1.0).alias("tournament_strength")
-        )
-
-    if timestamp_column and timestamp_column in match_data.columns:
-        match_data = match_data.with_columns(
-            pl.col(timestamp_column).alias("ts")
-        )
-    else:
-        timestamp_expressions = []
-        if "last_game_finished_at" in match_data.columns:
-            timestamp_expressions.append(pl.col("last_game_finished_at"))
-        if "match_created_at" in match_data.columns:
-            timestamp_expressions.append(pl.col("match_created_at"))
-        timestamp_expressions.append(pl.lit(now_timestamp))
-        match_data = match_data.with_columns(
-            pl.coalesce(timestamp_expressions).alias("ts")
-        )
-
-    time_decay_factor = (
-        ((pl.lit(now_timestamp) - pl.col("ts").cast(pl.Float64)) / 86400.0)
-        .mul(-decay_rate)
-        .exp()
-    )
-
-    if beta == 0.0:
-        match_weight = time_decay_factor
-    else:
-        match_weight = time_decay_factor * (
-            pl.col("tournament_strength") ** beta
-        )
-
-    match_data = match_data.with_columns(match_weight.alias("match_weight"))
 
     # Player selection for joins
     player_selection = players.select(
@@ -237,64 +269,9 @@ def _build_team_edges_normalized(
     if matches.is_empty():
         return pl.DataFrame([])
 
-    # Filter out byes and null teams
-    filter_expression = (
-        pl.col("winner_team_id").is_not_null()
-        & pl.col("loser_team_id").is_not_null()
+    match_data = _prepare_weighted_matches(
+        matches, tournament_influence, now_timestamp, decay_rate, beta,
     )
-
-    if "is_bye" in matches.columns:
-        filter_expression = filter_expression & ~pl.col("is_bye").fill_null(
-            False
-        )
-
-    match_data = matches.filter(filter_expression)
-
-    # Add tournament influence
-    if tournament_influence:
-        strength_dataframe = pl.DataFrame(
-            {
-                "tournament_id": list(tournament_influence.keys()),
-                "tournament_strength": list(tournament_influence.values()),
-            }
-        )
-        match_data = match_data.join(
-            strength_dataframe,
-            on="tournament_id",
-            how="left",
-            coalesce=True,
-        ).fill_null(1.0)
-    else:
-        match_data = match_data.with_columns(
-            pl.lit(1.0).alias("tournament_strength")
-        )
-
-    # Add timestamp
-    timestamp_expressions = []
-    if "last_game_finished_at" in match_data.columns:
-        timestamp_expressions.append(pl.col("last_game_finished_at"))
-    if "match_created_at" in match_data.columns:
-        timestamp_expressions.append(pl.col("match_created_at"))
-    timestamp_expressions.append(pl.lit(now_timestamp))
-    match_data = match_data.with_columns(
-        pl.coalesce(timestamp_expressions).alias("ts")
-    )
-
-    # Compute match weight
-    time_decay_factor = (
-        ((pl.lit(now_timestamp) - pl.col("ts").cast(pl.Float64)) / 86400.0)
-        .mul(-decay_rate)
-        .exp()
-    )
-
-    if beta == 0.0:
-        match_weight = time_decay_factor
-    else:
-        match_weight = time_decay_factor * (
-            pl.col("tournament_strength") ** beta
-        )
-
-    match_data = match_data.with_columns(match_weight.alias("match_weight"))
 
     # Aggregate team-to-team edges
     edges = match_data.group_by(["loser_team_id", "winner_team_id"]).agg(

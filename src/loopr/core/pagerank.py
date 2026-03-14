@@ -2,21 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 import scipy.sparse as sp
 
-
-@dataclass(frozen=True)
-class PageRankConfig:
-    """Configuration for PageRank algorithm."""
-
-    alpha: float = 0.85
-    tol: float = 1e-8
-    max_iter: int = 200
-    orientation: str = "row"
-    redistribute_dangling: bool = True
+from loopr.core.config import PageRankConfig
 
 
 def pagerank_sparse(
@@ -55,23 +44,10 @@ def pagerank_sparse(
     inverse_sums[nonzero_mask] = 1.0 / sums[nonzero_mask]
 
     def multiply(vector: np.ndarray) -> np.ndarray:
-        if adjacency_matrix is not None:
-            if cfg.orientation == "row":
-                return adjacency_matrix.T.dot(vector * inverse_sums)
-            else:
-                return adjacency_matrix.dot(vector * inverse_sums)
-
-        # Fallback: COO-style accumulation
-        result = np.zeros(num_nodes)
         if cfg.orientation == "row":
-            np.add.at(
-                result, cols, vector[rows] * (weights * inverse_sums[rows])
-            )
+            return adjacency_matrix.T.dot(vector * inverse_sums)
         else:
-            np.add.at(
-                result, rows, vector[cols] * (weights * inverse_sums[cols])
-            )
-        return result
+            return adjacency_matrix.dot(vector * inverse_sums)
 
     rank_vector = teleport / teleport.sum()
     alpha = cfg.alpha

@@ -1,8 +1,9 @@
 # === PATCH: Refactored TickTockEngine (parity to legacy tick–tock) ===
 
+from __future__ import annotations
+
 import math
 import time
-from typing import Dict, List, Optional
 
 import numpy as np
 import polars as pl
@@ -36,23 +37,19 @@ class TickTockEngine:
 
     def __init__(
         self,
-        config: Optional[TickTockConfig] = None,
+        config: TickTockConfig | None = None,
         *,
-        now_ts: Optional[float] = None,
-        clock: Optional[Clock] = None,
+        now_ts: float | None = None,
+        clock: Clock | None = None,
     ):
         self.config = config or TickTockConfig()
         # enforce legacy-like tolerance if config left wide
-        if (
-            getattr(self.config, "convergence_tol", None) is None
-            or self.config.convergence_tol > 1e-4
-        ):
-            self.config.convergence_tol = 1e-4
+        self._convergence_tol = min(self.config.convergence_tol, 1e-4)
 
         self.logger = get_logger(self.__class__.__name__)
         self.logger.info(
             f"TickTockEngine initialized: max_ticks={self.config.max_ticks}, "
-            f"convergence_tol={self.config.convergence_tol}, "
+            f"convergence_tol={self._convergence_tol}, "
             f"influence_method={self.config.influence_method}"
         )
 
@@ -74,15 +71,15 @@ class TickTockEngine:
             cap_ratio=self.config.engine.cap_ratio,
         )
 
-        self.last_result: Optional[TickTockResult] = None
-        self.tournament_influence: Dict[int, float] = {}
+        self.last_result: TickTockResult | None = None
+        self.tournament_influence: dict[int, float] = {}
 
     # ------------------------------------------------------------------ public
     def rank_players(
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-        initial_influence: Optional[Dict[int, float]] = None,
+        initial_influence: dict[int, float] | None = None,
     ) -> pl.DataFrame:
         start_time = time.time()
         inputs = prepare_rank_inputs(matches, players)
@@ -151,7 +148,7 @@ class TickTockEngine:
             self.logger.info(f"  Tournament influence delta: {delta:.6f}")
 
             self.tournament_influence = new_infl
-            if delta < self.config.convergence_tol:
+            if delta < self._convergence_tol:
                 self.logger.info(
                     f"Tick-tock converged at iteration {it + 1} (delta={delta:.6f})"
                 )
@@ -189,7 +186,7 @@ class TickTockEngine:
         self,
         matches: pl.DataFrame,
         participants: pl.DataFrame,
-        initial_influence: Optional[Dict[int, float]] = None,
+        initial_influence: dict[int, float] | None = None,
     ) -> pl.DataFrame:
         """Domain-agnostic wrapper returning `entity_id` rankings."""
         result = self.rank_players(matches, participants, initial_influence)
@@ -202,8 +199,8 @@ class TickTockEngine:
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-        tournament_influence: Dict[int, float],
-    ) -> Dict:
+        tournament_influence: dict[int, float],
+    ) -> dict:
         edges = _build_player_edges_normalized(
             matches,
             players,
@@ -272,7 +269,7 @@ class TickTockEngine:
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-    ) -> Dict[int, List]:
+    ) -> dict[int, list]:
         """Players who actually appeared in a tournament (join used teams -> rosters)."""
         used_teams = pl.concat(
             [
@@ -298,7 +295,7 @@ class TickTockEngine:
             pl.col("user_id").alias("participants")
         )
 
-        result: Dict[int, List] = {}
+        result: dict[int, list] = {}
         for row in grouped.iter_rows(named=True):
             result[int(row["tournament_id"])] = list(row["participants"])
         return result
@@ -306,14 +303,14 @@ class TickTockEngine:
     # ------------------------------------------------------ legacy-compatible tock
     def _compute_tournament_influence_compat(
         self,
-        scores_by_id: Dict,
-        participants: Dict[int, List],
+        scores_by_id: dict,
+        participants: dict[int, list],
         *,
         method: str,
         global_prior: float,
-    ) -> Dict[int, float]:
+    ) -> dict[int, float]:
         """Mirror legacy _compute_tournament_influence aggregation."""
-        out: Dict[int, float] = {}
+        out: dict[int, float] = {}
         for tid, ids in participants.items():
             vals = [float(scores_by_id.get(pid, global_prior)) for pid in ids]
             if not vals:

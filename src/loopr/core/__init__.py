@@ -5,7 +5,6 @@ from loopr.core.config import (
     EngineConfig,
     ExposureLogOddsConfig,
     PageRankConfig,
-    PipelineConfig,
     TickTockConfig,
 )
 from loopr.core.convert import (
@@ -32,12 +31,9 @@ from loopr.core.influence import (
 from loopr.core.pagerank import pagerank_dense, pagerank_sparse
 from loopr.core.protocols import RatingBackend
 from loopr.core.results import (
-    BenchmarkResult,
     ExposureLogOddsResult,
-    PipelineResult,
     RankResult,
     TickTockResult,
-    ValidationResult,
 )
 from loopr.core.smoothing import (
     AdaptiveSmoothing,
@@ -71,7 +67,6 @@ from loopr.core.time import (
 __all__ = [
     "AdaptiveSmoothing",
     "ActivePlayersTeleport",
-    "BenchmarkResult",
     "Clock",
     "ConstantSmoothing",
     "CustomTeleport",
@@ -82,8 +77,6 @@ __all__ = [
     "HybridSmoothing",
     "NoSmoothing",
     "PageRankConfig",
-    "PipelineConfig",
-    "PipelineResult",
     "RankResult",
     "RatingBackend",
     "SmoothingStrategy",
@@ -91,7 +84,6 @@ __all__ = [
     "TickTockConfig",
     "TickTockResult",
     "UniformTeleport",
-    "ValidationResult",
     "VolumeInverseTeleport",
     "WinsProportional",
     "add_time_features",

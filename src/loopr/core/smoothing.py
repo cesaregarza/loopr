@@ -194,8 +194,6 @@ def get_smoothing_strategy(mode: str, **kwargs: Any) -> SmoothingStrategy:
     if strategy_class is None:
         raise ValueError(f"Unknown smoothing mode: {mode}")
 
-    import inspect
-
     if hasattr(strategy_class, "__dataclass_fields__"):
         valid_fields = strategy_class.__dataclass_fields__.keys()
         filtered_kwargs = {

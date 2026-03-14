@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 
+from loopr.core.edges import _prepare_weighted_matches
 from loopr.schema import (
     prepare_rank_inputs,
     normalize_appearances_schema,
@@ -104,58 +105,11 @@ def _convert_matches_dataframe_normalized(
         [c for c in needed_columns if c in matches.columns]
     )
 
-    filter_condition = (
-        pl.col("winner_team_id").is_not_null()
-        & pl.col("loser_team_id").is_not_null()
+    match_data = _prepare_weighted_matches(
+        match_data, tournament_influence, now_timestamp, decay_rate, beta,
     )
 
-    if "is_bye" in match_data.columns:
-        filter_condition = filter_condition & ~pl.col("is_bye").fill_null(False)
-
-    match_data = match_data.filter(filter_condition)
-
-    timestamp_expressions = []
-    if "last_game_finished_at" in match_data.columns:
-        timestamp_expressions.append(pl.col("last_game_finished_at"))
-    if "match_created_at" in match_data.columns:
-        timestamp_expressions.append(pl.col("match_created_at"))
-    timestamp_expressions.append(pl.lit(now_timestamp))
-    timestamp_expr = pl.coalesce(timestamp_expressions).cast(pl.Int64)
-
-    match_data = match_data.with_columns(timestamp_expr.alias("ts"))
-
-    if tournament_influence:
-        strength_dataframe = pl.DataFrame(
-            {
-                "tournament_id": list(tournament_influence.keys()),
-                "tournament_strength": list(tournament_influence.values()),
-            }
-        )
-        match_data = match_data.join(
-            strength_dataframe,
-            on="tournament_id",
-            how="left",
-            coalesce=True,
-        ).with_columns(pl.col("tournament_strength").fill_null(1.0))
-    else:
-        match_data = match_data.with_columns(
-            pl.lit(1.0).alias("tournament_strength")
-        )
-
-    time_decay_factor = (
-        ((pl.lit(now_timestamp) - pl.col("ts").cast(pl.Float64)) / 86400.0)
-        .mul(-decay_rate)
-        .exp()
-    )
-
-    if beta == 0.0:
-        weight_expression = time_decay_factor
-    else:
-        weight_expression = time_decay_factor * (
-            pl.col("tournament_strength") ** beta
-        )
-
-    match_data = match_data.with_columns(weight_expression.alias("weight"))
+    match_data = match_data.rename({"match_weight": "weight"})
 
     # Build baseline roster lists (team-level) for fallback
     if rosters is None:

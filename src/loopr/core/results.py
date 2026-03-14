@@ -52,12 +52,12 @@ class RankResult:
 
         if self.win_pagerank is not None:
             dataframe = dataframe.with_columns(
-                pl.Series("win_pagerank", self.win_pagerank)
+                pl.Series("win_pr", self.win_pagerank)
             )
 
         if self.loss_pagerank is not None:
             dataframe = dataframe.with_columns(
-                pl.Series("loss_pagerank", self.loss_pagerank)
+                pl.Series("loss_pr", self.loss_pagerank)
             )
 
         if self.exposure is not None:
@@ -106,104 +106,3 @@ class ExposureLogOddsResult(RankResult):
     decay_factors: np.ndarray | None = None
 
 
-@dataclass
-class PipelineResult:
-    """Complete pipeline execution results."""
-
-    result: RankResult
-    algorithm: str
-    config: dict[str, Any] = field(default_factory=dict)
-    intermediate: dict[str, Any] | None = None
-    total_time: float | None = None
-    memory_usage: float | None = None
-    graded_dataframe: pl.DataFrame | None = None
-
-    def to_dataframe(self) -> pl.DataFrame:
-        """Get main result as DataFrame.
-
-        Returns:
-            DataFrame with algorithm results and optional grading.
-        """
-        dataframe = self.result.to_dataframe()
-
-        dataframe = dataframe.with_columns(
-            pl.lit(self.algorithm).alias("algorithm")
-        )
-
-        if self.graded_dataframe is not None:
-            id_column = dataframe.columns[0]
-            dataframe = dataframe.join(
-                self.graded_dataframe.select(
-                    [id_column, "grade", "display_score"]
-                ),
-                on=id_column,
-                how="left",
-            )
-
-        return dataframe
-
-
-@dataclass
-class ValidationResult:
-    """Results from validation checks."""
-
-    is_valid: bool
-    errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-
-    pagerank_normalized: bool = True
-    teleport_normalized: bool = True
-    scores_finite: bool = True
-    no_duplicates: bool = True
-
-    def __str__(self) -> str:
-        """String representation of validation results.
-
-        Returns:
-            Human-readable validation status.
-        """
-        if self.is_valid:
-            message = "Validation passed"
-            if self.warnings:
-                message += f" with {len(self.warnings)} warning(s)"
-        else:
-            message = f"Validation failed with {len(self.errors)} error(s)"
-        return message
-
-
-@dataclass
-class BenchmarkResult:
-    """Results from performance benchmarking."""
-
-    algorithm: str
-    dataset_size: int
-
-    total_time: float
-    pagerank_time: float
-    preprocessing_time: float
-    postprocessing_time: float
-
-    peak_memory_mb: float
-
-    iterations: int
-    converged: bool
-    final_error: float
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for easy serialization.
-
-        Returns:
-            Dictionary with all benchmark results.
-        """
-        return {
-            "algorithm": self.algorithm,
-            "dataset_size": self.dataset_size,
-            "total_time": self.total_time,
-            "pagerank_time": self.pagerank_time,
-            "preprocessing_time": self.preprocessing_time,
-            "postprocessing_time": self.postprocessing_time,
-            "peak_memory_mb": self.peak_memory_mb,
-            "iterations": self.iterations,
-            "converged": self.converged,
-            "final_error": self.final_error,
-        }

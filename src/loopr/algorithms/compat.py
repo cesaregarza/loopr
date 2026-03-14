@@ -17,6 +17,7 @@ import polars as pl
 
 from loopr.algorithms.tick_tock import TickTockEngine
 from loopr.core import TickTockConfig
+from loopr.core.config import DecayConfig, EngineConfig, PageRankConfig
 
 
 def _map_influence_method(method: str | None) -> str:
@@ -85,15 +86,18 @@ class RatingEngine:
         self.pagerank_tol = float(kwargs.get("pagerank_tol", self.pagerank_tol))
 
         # Build TickTockEngine configuration
-        cfg = TickTockConfig()
-        cfg.decay.half_life_days = self.decay_half_life_days
-        cfg.pagerank.alpha = self.damping_factor
-        cfg.engine.beta = self.beta
-        cfg.max_ticks = self.max_tick_tock
-        cfg.convergence_tol = self.tick_tock_stabilize_tol
-        cfg.pagerank.max_iter = self.max_pagerank_iter
-        cfg.pagerank.tol = self.pagerank_tol
-        cfg.influence_method = _map_influence_method(self.influence_agg_method)
+        cfg = TickTockConfig(
+            engine=EngineConfig(beta=self.beta),
+            pagerank=PageRankConfig(
+                alpha=self.damping_factor,
+                max_iter=self.max_pagerank_iter,
+                tol=self.pagerank_tol,
+            ),
+            decay=DecayConfig(half_life_days=self.decay_half_life_days),
+            max_ticks=self.max_tick_tock,
+            convergence_tol=self.tick_tock_stabilize_tol,
+            influence_method=_map_influence_method(self.influence_agg_method),
+        )
 
         self._engine = TickTockEngine(config=cfg)
 

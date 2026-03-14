@@ -1,7 +1,8 @@
 """Classic row-stochastic PageRank backend for tick-tock orchestration."""
 
+from __future__ import annotations
+
 import logging
-from typing import Dict, List, Optional
 
 import numpy as np
 import polars as pl
@@ -82,9 +83,9 @@ class RowPRBackend:
     def compute(
         self,
         matches: pl.DataFrame,
-        players: Optional[pl.DataFrame],
-        active_ids: List,
-        tournament_influence: Dict[int, float],
+        players: pl.DataFrame | None,
+        active_ids: list,
+        tournament_influence: dict[int, float],
         **kwargs,
     ) -> pl.DataFrame:
         """

@@ -510,7 +510,7 @@ def loo_update_graph_exact(
                 logger.warning(
                     f"K matrix is ill-conditioned: cond={cond:.3e}. Results may be inaccurate."
                 )
-        except:
+        except Exception:
             pass  # Conditioning check failed, continue anyway
 
         # beta solves K beta = g, where g = E^T s = s[j_list]
