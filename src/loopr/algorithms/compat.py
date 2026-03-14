@@ -1,11 +1,11 @@
 """Compatibility wrapper exposing a RatingEngine API backed by algorithms.
 
-This preserves the historical `rankings.RatingEngine` interface while
-internally delegating to the modern engines in `rankings.algorithms`.
+This preserves the historical `rank_players(...)` style interface while
+internally delegating to the modern `loopr` engines.
 
-Currently, `rankings.RatingEngine.rank_players` is implemented via
-`TickTockEngine` to provide a PageRank-based player ranking with
-legacy-compatible defaults and output schema (id + player_rank).
+`RatingEngine.rank_players(...)` is implemented via `TickTockEngine` to
+provide a legacy-compatible output schema (`id` + `player_rank`) while the
+canonical public API for the package remains `rank_entities(...)`.
 """
 
 from __future__ import annotations

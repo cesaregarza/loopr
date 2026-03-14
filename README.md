@@ -28,6 +28,10 @@ Legacy `sendouq_analysis` column names are still accepted.
 
 ## Quick start
 
+Canonical API: `rank_entities(...)`. Legacy `rank_players(...)` wrappers remain
+available for compatibility, but the neutral entity/group/event naming is the
+recommended surface for new callers.
+
 ```python
 import polars as pl
 

@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 
-from loopr.schema import normalize_matches_schema, normalize_participants_schema
+from loopr.schema import (
+    normalize_matches_schema,
+    prepare_rank_inputs,
+)
 
 if TYPE_CHECKING:
     from typing import Any, Dict, Tuple
@@ -37,9 +40,28 @@ def build_player_edges(
     Returns:
         Edge DataFrame with columns: loser_user_id, winner_user_id, weight_sum.
     """
-    matches = normalize_matches_schema(matches)
-    players = normalize_participants_schema(players)
+    prepared = prepare_rank_inputs(matches, players)
+    return _build_player_edges_normalized(
+        prepared.matches,
+        prepared.participants,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+        timestamp_column=timestamp_column,
+    )
 
+
+def _build_player_edges_normalized(
+    matches: pl.DataFrame,
+    players: pl.DataFrame,
+    tournament_influence: dict[int, float],
+    now_timestamp: float,
+    decay_rate: float,
+    beta: float = 0.0,
+    timestamp_column: str | None = None,
+) -> pl.DataFrame:
+    """Internal player-edge construction for already-normalized inputs."""
     if matches.is_empty() or players.is_empty():
         return pl.DataFrame([])
 
@@ -195,7 +217,23 @@ def build_team_edges(
         Edge DataFrame with columns: loser_team_id, winner_team_id, weight_sum.
     """
     matches = normalize_matches_schema(matches)
+    return _build_team_edges_normalized(
+        matches,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+    )
 
+
+def _build_team_edges_normalized(
+    matches: pl.DataFrame,
+    tournament_influence: dict[int, float],
+    now_timestamp: float,
+    decay_rate: float,
+    beta: float = 0.0,
+) -> pl.DataFrame:
+    """Internal team-edge construction for already-normalized match inputs."""
     if matches.is_empty():
         return pl.DataFrame([])
 

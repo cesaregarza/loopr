@@ -19,10 +19,12 @@ from loopr.core import (
     convert_matches_dataframe,
 )
 from loopr.schema import (
+    NormalizedRankingInputs,
     normalize_appearances_schema,
     normalize_matches_schema,
     normalize_participants_schema,
     normalize_rank_inputs,
+    prepare_rank_inputs,
 )
 
 __all__ = [
@@ -34,6 +36,7 @@ __all__ = [
     "ExposureLogOddsResult",
     "LOOAnalyzer",
     "LOOPREngine",
+    "NormalizedRankingInputs",
     "PageRankConfig",
     "TTLEngine",
     "TickTockConfig",
@@ -44,6 +47,7 @@ __all__ = [
     "normalize_matches_schema",
     "normalize_participants_schema",
     "normalize_rank_inputs",
+    "prepare_rank_inputs",
 ]
 
 __version__ = "0.1.0"

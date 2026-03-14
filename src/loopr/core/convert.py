@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 
 from loopr.schema import (
+    prepare_rank_inputs,
     normalize_appearances_schema,
     normalize_matches_schema,
     normalize_participants_schema,
@@ -54,10 +55,36 @@ def convert_matches_dataframe(
         losers (list of user_ids), weight (float), ts (timestamp). If include_share=True,
         also includes winner_count, loser_count, share.
     """
-    matches = normalize_matches_schema(matches)
-    players = normalize_participants_schema(players)
+    prepared = prepare_rank_inputs(matches, players, appearances)
     rosters = normalize_participants_schema(rosters)
-    appearances = normalize_appearances_schema(appearances)
+    return _convert_matches_dataframe_normalized(
+        prepared.matches,
+        prepared.participants,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+        rosters=rosters,
+        appearances=prepared.appearances,
+        include_share=include_share,
+        streaming=streaming,
+    )
+
+
+def _convert_matches_dataframe_normalized(
+    matches: pl.DataFrame,
+    players: pl.DataFrame,
+    tournament_influence: dict[int, float],
+    now_timestamp: float,
+    decay_rate: float,
+    beta: float = 0.0,
+    *,
+    rosters: pl.DataFrame | None = None,
+    appearances: pl.DataFrame | None = None,
+    include_share: bool = True,
+    streaming: bool = False,
+) -> pl.DataFrame:
+    """Internal conversion path that assumes all inputs are already normalized."""
 
     needed_columns = [
         "match_id",
@@ -320,9 +347,26 @@ def convert_matches_format(
     Returns:
         List of match dictionaries.
     """
-    matches = normalize_matches_schema(matches)
-    players = normalize_participants_schema(players)
+    prepared = prepare_rank_inputs(matches, players)
+    return _convert_matches_format_normalized(
+        prepared.matches,
+        prepared.participants,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+    )
 
+
+def _convert_matches_format_normalized(
+    matches: pl.DataFrame,
+    players: pl.DataFrame,
+    tournament_influence: dict[int, float],
+    now_timestamp: float,
+    decay_rate: float,
+    beta: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Internal fallback conversion path for already-normalized inputs."""
     converted = []
 
     for row in matches.iter_rows(named=True):
@@ -398,7 +442,23 @@ def convert_team_matches(
         List of match dictionaries with team IDs as single-element lists.
     """
     matches = normalize_matches_schema(matches)
+    return _convert_team_matches_normalized(
+        matches,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+    )
 
+
+def _convert_team_matches_normalized(
+    matches: pl.DataFrame,
+    tournament_influence: dict[int, float],
+    now_timestamp: float,
+    decay_rate: float,
+    beta: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Internal team conversion path for already-normalized match inputs."""
     converted = []
 
     for row in matches.iter_rows(named=True):

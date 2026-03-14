@@ -11,14 +11,14 @@ from loopr.core import (
     PageRankConfig,
     VolumeInverseTeleport,
     WinsProportional,
-    build_player_edges,
     compute_denominators,
     edges_to_triplets,
     normalize_edges,
     pagerank_sparse,
 )
+from loopr.core.edges import _build_player_edges_normalized
 from loopr.core.logging import get_logger
-from loopr.schema import normalize_rank_inputs
+from loopr.schema import prepare_rank_inputs
 
 
 class RowPRBackend:
@@ -105,10 +105,12 @@ class RowPRBackend:
             )
             return pl.DataFrame()
 
-        matches, players, _ = normalize_rank_inputs(matches, players)
+        inputs = prepare_rank_inputs(matches, players)
+        matches = inputs.matches
+        players = inputs.participants
 
         # Build edges with tournament influence
-        edges = build_player_edges(
+        edges = _build_player_edges_normalized(
             matches,
             players,
             tournament_influence,

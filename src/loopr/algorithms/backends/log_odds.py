@@ -5,15 +5,21 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from loopr.algorithms._log_odds_common import (
+    merged_node_ids,
+    reporting_exposure,
+    resolve_lambda,
+    teleport_from_share,
+)
 from loopr.core import (
     Clock,
     PageRankConfig,
     build_exposure_triplets,
-    convert_matches_dataframe,
     pagerank_sparse,
 )
+from loopr.core.convert import _convert_matches_dataframe_normalized
 from loopr.core.logging import get_logger
-from loopr.schema import normalize_rank_inputs
+from loopr.schema import prepare_rank_inputs
 
 
 class LogOddsBackend:
@@ -85,9 +91,11 @@ class LogOddsBackend:
             )
             return pl.DataFrame()
 
-        matches, players, _ = normalize_rank_inputs(matches, players)
+        inputs = prepare_rank_inputs(matches, players)
+        matches = inputs.matches
+        players = inputs.participants
 
-        matches_df = convert_matches_dataframe(
+        matches_df = _convert_matches_dataframe_normalized(
             matches,
             players,
             tournament_influence or {},
@@ -101,37 +109,14 @@ class LogOddsBackend:
             self.logger.warning("No valid matches after conversion")
             return pl.DataFrame()
 
-        all_player_ids = set()
-        for row in matches_df.iter_rows(named=True):
-            all_player_ids.update(row["winners"])
-            all_player_ids.update(row["losers"])
-        node_ids = sorted(list(all_player_ids))
+        node_ids = merged_node_ids(matches_df)
         node_to_idx = {player_id: idx for idx, player_id in enumerate(node_ids)}
         num_nodes = len(node_ids)
 
-        winners_share = (
-            matches_df.select(["winners", "share"])
-            .explode("winners")
-            .rename({"winners": "id"})
-        )
-        losers_share = (
-            matches_df.select(["losers", "share"])
-            .explode("losers")
-            .rename({"losers": "id"})
-        )
-        exposure_share_df = (
-            pl.concat([winners_share, losers_share])
-            .group_by("id")
-            .agg(pl.col("share").sum().alias("e_share"))
-        )
-
-        teleport_vector = np.full(num_nodes, self.epsilon, dtype=float)
-        for row in exposure_share_df.iter_rows(named=True):
-            idx = node_to_idx.get(row["id"])
-            if idx is not None:
-                teleport_vector[idx] += float(row["e_share"])
-        teleport_vector /= (
-            teleport_vector.sum() if teleport_vector.sum() > 0 else 1.0
+        teleport_vector = teleport_from_share(
+            matches_df,
+            node_to_idx,
+            epsilon=self.epsilon,
         )
         self._last_rho = teleport_vector
 
@@ -152,18 +137,13 @@ class LogOddsBackend:
             cols, rows, data, num_nodes, teleport_vector, pagerank_config
         )
 
-        if self.lambda_mode == "fixed" and self.fixed_lambda is not None:
-            lambda_smooth = float(self.fixed_lambda)
-        elif self.lambda_mode == "auto":
-            target = 0.025 * float(np.median(win_pagerank))
-            median_teleport = float(np.median(teleport_vector))
-            lambda_smooth = (
-                0.0
-                if median_teleport == 0.0
-                else max(target / median_teleport, 0.0)
-            )
-        else:
-            lambda_smooth = 1e-4
+        lambda_smooth = resolve_lambda(
+            win_pagerank,
+            teleport_vector,
+            lambda_mode=self.lambda_mode,
+            fixed_lambda=self.fixed_lambda,
+            fallback=1e-4,
+        )
 
         smoothed_win_pagerank = win_pagerank + lambda_smooth * teleport_vector
         smoothed_loss_pagerank = loss_pagerank + lambda_smooth * teleport_vector
@@ -172,35 +152,15 @@ class LogOddsBackend:
             smoothed_win_pagerank + smoothed_loss_pagerank
         )
 
-        winners_weight = (
-            matches_df.select(["winners", "weight"])
-            .explode("winners")
-            .rename({"winners": "id"})
-        )
-        losers_weight = (
-            matches_df.select(["losers", "weight"])
-            .explode("losers")
-            .rename({"losers": "id"})
-        )
-        exposure_weight_df = (
-            pl.concat([winners_weight, losers_weight])
-            .group_by("id")
-            .agg(pl.col("weight").sum().alias("exposure"))
-        )
-
-        exposure = np.zeros(num_nodes, dtype=float)
-        for row in exposure_weight_df.iter_rows(named=True):
-            idx = node_to_idx.get(row["id"])
-            if idx is not None:
-                exposure[idx] = float(row["exposure"])
+        exposure = reporting_exposure(matches_df, node_to_idx)
 
         return pl.DataFrame(
             {
                 "id": node_ids,
                 "score": scores.tolist(),
                 "quality_mass": quality_mass.tolist(),
-                "win_pagerank": win_pagerank.tolist(),
-                "loss_pagerank": loss_pagerank.tolist(),
+                "win_pr": win_pagerank.tolist(),
+                "loss_pr": loss_pagerank.tolist(),
                 "exposure": exposure.tolist(),
                 "lambda_used": [lambda_smooth] * num_nodes,
             }

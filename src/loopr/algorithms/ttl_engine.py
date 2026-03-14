@@ -22,9 +22,9 @@ from loopr.core import (
     compute_tournament_influence,
     normalize_influence,
 )
-from loopr.core.logging import get_logger, log_timing
+from loopr.core.logging import get_logger
 from loopr.core.protocols import RatingBackend
-from loopr.schema import normalize_rank_inputs
+from loopr.schema import prepare_rank_inputs
 
 
 class TTLEngine:
@@ -94,7 +94,9 @@ class TTLEngine:
             DataFrame with player rankings
         """
         start_time = time.time()
-        matches, players, _ = normalize_rank_inputs(matches, players)
+        inputs = prepare_rank_inputs(matches, players)
+        matches = inputs.matches
+        players = inputs.participants
 
         # Initialize tournament influence
         if initial_influence:

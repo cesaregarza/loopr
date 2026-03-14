@@ -6,6 +6,12 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import polars as pl
 
+from loopr.algorithms._log_odds_common import (
+    merged_node_ids,
+    reporting_exposure,
+    resolve_lambda,
+    teleport_from_share,
+)
 from loopr.core import (
     Clock,
     ExposureLogOddsConfig,
@@ -13,11 +19,11 @@ from loopr.core import (
     PageRankConfig,
     apply_inactivity_decay,
     build_exposure_triplets,
-    convert_matches_dataframe,
     pagerank_sparse,
 )
-from loopr.core.logging import get_logger, log_timing
-from loopr.schema import normalize_rank_inputs
+from loopr.core.convert import _convert_matches_dataframe_normalized
+from loopr.core.logging import get_logger
+from loopr.schema import prepare_rank_inputs
 
 if TYPE_CHECKING:
     from loopr.analysis.loo_analyzer import LOOAnalyzer
@@ -78,9 +84,14 @@ class ExposureLogOddsEngine:
             DataFrame containing player rankings.
         """
         start_time = time.time()
-        matches, players, appearances = normalize_rank_inputs(
-            matches, players, appearances
+        inputs = prepare_rank_inputs(
+            matches,
+            players,
+            appearances,
         )
+        matches = inputs.matches
+        players = inputs.participants
+        appearances = inputs.appearances
 
         # 1) Get active players and tournament influences via tick‑tock
         #    Note: we will UNION these with players who actually appear in matches
@@ -99,7 +110,7 @@ class ExposureLogOddsEngine:
 
         # 2) Convert matches into compact per-match lists with roster expansion and weights
         self.logger.info("Converting matches...")
-        mdf = convert_matches_dataframe(
+        mdf = _convert_matches_dataframe_normalized(
             matches,
             players,
             tournament_influence or {},
@@ -121,23 +132,7 @@ class ExposureLogOddsEngine:
         #    appeared in matches (subs, late adds). This unions the tick‑tock set
         #    with the IDs present in winners/losers after conversion.
         #    This ensures valid appearance-only players are not dropped.
-        try:
-            w_ids = (
-                mdf.select(["winners"])
-                .explode("winners")["winners"]
-                .unique()
-                .to_list()
-            )
-            l_ids = (
-                mdf.select(["losers"])
-                .explode("losers")["losers"]
-                .unique()
-                .to_list()
-            )
-            appeared_ids = set(w_ids) | set(l_ids)
-        except Exception:
-            appeared_ids = set()
-        node_ids = list(set(active_players) | appeared_ids)
+        node_ids = merged_node_ids(mdf, active_players)
         if not node_ids:
             self.logger.warning(
                 "No active or appeared players after union; returning empty result."
@@ -147,32 +142,7 @@ class ExposureLogOddsEngine:
         num_nodes = len(node_ids)
 
         # 4) Build teleport ρ from exposure mass
-        winners_share = (
-            mdf.select(["winners", "share"])
-            .explode("winners")
-            .rename({"winners": "id"})
-        )
-        losers_share = (
-            mdf.select(["losers", "share"])
-            .explode("losers")
-            .rename({"losers": "id"})
-        )
-        exp_share_df = (
-            pl.concat([winners_share, losers_share])
-            .group_by("id")
-            .agg(pl.col("share").sum().alias("e_share"))
-        )
-        e_share = np.zeros(num_nodes, dtype=float)
-        for row in exp_share_df.iter_rows(named=True):
-            idx = node_to_idx.get(row["id"])
-            if idx is not None:
-                e_share[idx] = float(row["e_share"])
-
-        eps = 1e-12
-        rho = e_share + eps
-        if rho.sum() == 0.0 or not np.isfinite(rho.sum()):
-            rho[:] = 1.0
-        rho = rho / rho.sum()
+        rho = teleport_from_share(mdf, node_to_idx)
         self._last_rho = rho
 
         # 5) Triplets for A_win (loser -> winner), then mirror for A_loss
@@ -195,16 +165,13 @@ class ExposureLogOddsEngine:
         )
 
         # 7) Lambda smoothing
-        if self.config.fixed_lambda is not None:
-            lambda_smooth = float(self.config.fixed_lambda)
-        elif self.config.lambda_mode == "auto":
-            target = 0.025 * float(np.median(win_pagerank))
-            median_rho = float(np.median(rho))
-            lambda_smooth = (
-                0.0 if median_rho == 0.0 else max(target / median_rho, 0.0)
-            )
-        else:
-            lambda_smooth = self.config.engine.lambda_smooth or 1e-4
+        lambda_smooth = resolve_lambda(
+            win_pagerank,
+            rho,
+            lambda_mode=self.config.lambda_mode,
+            fixed_lambda=self.config.fixed_lambda,
+            fallback=self.config.engine.lambda_smooth or 1e-4,
+        )
         self.logger.info(f"Lambda used: {lambda_smooth:.6f}")
 
         # 8) Log-odds scores
@@ -228,26 +195,7 @@ class ExposureLogOddsEngine:
             )
 
         # 10) Calculate reporting exposure
-        winners_w = (
-            mdf.select(["winners", "weight"])
-            .explode("winners")
-            .rename({"winners": "id"})
-        )
-        losers_w = (
-            mdf.select(["losers", "weight"])
-            .explode("losers")
-            .rename({"losers": "id"})
-        )
-        exp_w_df = (
-            pl.concat([winners_w, losers_w])
-            .group_by("id")
-            .agg(pl.col("weight").sum().alias("exposure"))
-        )
-        exposure = np.zeros(num_nodes, dtype=float)
-        for row in exp_w_df.iter_rows(named=True):
-            idx = node_to_idx.get(row["id"])
-            if idx is not None:
-                exposure[idx] = float(row["exposure"])
+        exposure = reporting_exposure(mdf, node_to_idx)
 
         # 11) Apply minimum exposure filter if configured
         mask = np.ones(num_nodes, dtype=bool)

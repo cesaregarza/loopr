@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import polars as pl
 
 _MATCH_ALIASES = {
@@ -24,6 +26,20 @@ _APPEARANCE_ALIASES = {
     "team_id": ("group_id", "side_id", "competitor_id"),
     "user_id": ("entity_id", "participant_id", "player_id"),
 }
+
+
+@dataclass(frozen=True)
+class NormalizedRankingInputs:
+    """Normalized ranking inputs used across LOOPR internals."""
+
+    matches: pl.DataFrame
+    participants: pl.DataFrame
+    appearances: pl.DataFrame | None = None
+
+    @property
+    def players(self) -> pl.DataFrame:
+        """Legacy alias used by existing engine internals."""
+        return self.participants
 
 
 def _rename_aliases(
@@ -72,8 +88,18 @@ def normalize_rank_inputs(
     appearances: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame | None]:
     """Normalize all ranking inputs to LOOPR's internal schema."""
-    return (
-        normalize_matches_schema(matches),
-        normalize_participants_schema(participants),
-        normalize_appearances_schema(appearances),
+    prepared = prepare_rank_inputs(matches, participants, appearances)
+    return prepared.matches, prepared.participants, prepared.appearances
+
+
+def prepare_rank_inputs(
+    matches: pl.DataFrame,
+    participants: pl.DataFrame,
+    appearances: pl.DataFrame | None = None,
+) -> NormalizedRankingInputs:
+    """Normalize all ranking inputs into a single explicit container."""
+    return NormalizedRankingInputs(
+        matches=normalize_matches_schema(matches),
+        participants=normalize_participants_schema(participants),
+        appearances=normalize_appearances_schema(appearances),
     )

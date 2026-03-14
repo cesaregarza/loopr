@@ -22,7 +22,7 @@ def setup_logging(
     format_style: str = "detailed",
     include_timestamp: bool = True,
 ) -> logging.Logger:
-    """Set up centralized logging for the rankings package.
+    """Set up centralized logging for the LOOPR package.
 
     Args:
         level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL). Defaults to logging.INFO.
