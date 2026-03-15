@@ -107,9 +107,23 @@ class RowPRBackend:
             return pl.DataFrame()
 
         inputs = prepare_rank_inputs(matches, players)
-        matches = inputs.matches
-        players = inputs.participants
+        return self.compute_normalized(
+            inputs.matches,
+            inputs.participants,
+            active_ids,
+            tournament_influence,
+            **kwargs,
+        )
 
+    def compute_normalized(
+        self,
+        matches: pl.DataFrame,
+        players: pl.DataFrame,
+        active_ids: list,
+        tournament_influence: dict[int, float],
+        **kwargs,
+    ) -> pl.DataFrame:
+        """Compute ratings from already-normalized match and player frames."""
         # Build edges with tournament influence
         edges = _build_player_edges_normalized(
             matches,
@@ -182,9 +196,9 @@ class RowPRBackend:
         result = pl.DataFrame(
             {
                 "id": node_ids,
-                "score": pagerank.tolist(),
-                "quality_mass": quality_mass.tolist(),
-                "pagerank": pagerank.tolist(),
+                "score": pagerank,
+                "quality_mass": quality_mass,
+                "pagerank": pagerank,
             }
         )
 

@@ -6,6 +6,8 @@ import numpy as np
 import polars as pl
 
 from loopr.algorithms._log_odds_common import (
+    aggregate_entity_metrics,
+    build_index_mapping,
     merged_node_ids,
     reporting_exposure,
     resolve_lambda,
@@ -92,9 +94,23 @@ class LogOddsBackend:
             return pl.DataFrame()
 
         inputs = prepare_rank_inputs(matches, players)
-        matches = inputs.matches
-        players = inputs.participants
+        return self.compute_normalized(
+            inputs.matches,
+            inputs.participants,
+            active_ids,
+            tournament_influence,
+            **kwargs,
+        )
 
+    def compute_normalized(
+        self,
+        matches: pl.DataFrame,
+        players: pl.DataFrame,
+        active_ids: list[int],
+        tournament_influence: dict[int, float],
+        **kwargs,
+    ) -> pl.DataFrame:
+        """Compute ratings from already-normalized match and player frames."""
         matches_df = _convert_matches_dataframe_normalized(
             matches,
             players,
@@ -109,18 +125,28 @@ class LogOddsBackend:
             self.logger.warning("No valid matches after conversion")
             return pl.DataFrame()
 
-        node_ids = merged_node_ids(matches_df)
+        entity_metrics = aggregate_entity_metrics(matches_df)
+        node_ids = merged_node_ids(
+            matches_df,
+            aggregated_metrics=entity_metrics,
+        )
         node_to_idx = {player_id: idx for idx, player_id in enumerate(node_ids)}
         num_nodes = len(node_ids)
+        index_mapping = build_index_mapping(node_to_idx)
 
         teleport_vector = teleport_from_share(
             matches_df,
             node_to_idx,
+            aggregated_metrics=entity_metrics,
+            index_mapping=index_mapping,
             epsilon=self.epsilon,
         )
         self._last_rho = teleport_vector
 
-        rows, cols, data = build_exposure_triplets(matches_df, node_to_idx)
+        rows, cols, data = build_exposure_triplets(
+            matches_df,
+            index_mapping=index_mapping,
+        )
 
         pagerank_config = PageRankConfig(
             alpha=self.alpha,
@@ -152,16 +178,21 @@ class LogOddsBackend:
             smoothed_win_pagerank + smoothed_loss_pagerank
         )
 
-        exposure = reporting_exposure(matches_df, node_to_idx)
+        exposure = reporting_exposure(
+            matches_df,
+            node_to_idx,
+            aggregated_metrics=entity_metrics,
+            index_mapping=index_mapping,
+        )
 
         return pl.DataFrame(
             {
                 "id": node_ids,
-                "score": scores.tolist(),
-                "quality_mass": quality_mass.tolist(),
-                "win_pr": win_pagerank.tolist(),
-                "loss_pr": loss_pagerank.tolist(),
-                "exposure": exposure.tolist(),
+                "score": scores,
+                "quality_mass": quality_mass,
+                "win_pr": win_pagerank,
+                "loss_pr": loss_pagerank,
+                "exposure": exposure,
                 "lambda_used": [lambda_smooth] * num_nodes,
             }
         )

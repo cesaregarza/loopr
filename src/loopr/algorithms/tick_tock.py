@@ -175,7 +175,7 @@ class TickTockEngine:
         out = pl.DataFrame(
             {
                 "player_id": tick_result["node_ids"],
-                "rating": tick_result["pagerank"].tolist(),
+                "rating": tick_result["pagerank"],
             }
         )
         elapsed = time.time() - start_time
@@ -270,35 +270,32 @@ class TickTockEngine:
         matches: pl.DataFrame,
         players: pl.DataFrame,
     ) -> dict[int, list]:
-        """Players who actually appeared in a tournament (join used teams -> rosters)."""
-        used_teams = pl.concat(
-            [
-                matches.select(
-                    pl.col("tournament_id"),
-                    pl.col("winner_team_id").alias("team_id"),
-                ),
-                matches.select(
-                    pl.col("tournament_id"),
-                    pl.col("loser_team_id").alias("team_id"),
-                ),
-            ]
-        ).unique()
-        # roster subset for used teams
-        rosters = (
-            players.join(
-                used_teams, on=["tournament_id", "team_id"], how="inner"
-            )
-            .select(["tournament_id", "user_id"])
-            .unique()
-        )
-        grouped = rosters.group_by("tournament_id").agg(
-            pl.col("user_id").alias("participants")
-        )
+        """Players who actually appeared in a tournament (join used teams -> rosters).
 
-        result: dict[int, list] = {}
-        for row in grouped.iter_rows(named=True):
-            result[int(row["tournament_id"])] = list(row["participants"])
-        return result
+        Uses a dict-based approach instead of multiple Polars joins for speed.
+        """
+        # Build roster lookup: (tournament_id, team_id) → set of user_ids
+        roster_lookup: dict[tuple[int, int], set] = {}
+        for row in players.select(
+            ["tournament_id", "team_id", "user_id"]
+        ).iter_rows():
+            key = (int(row[0]), int(row[1]))
+            roster_lookup.setdefault(key, set()).add(row[2])
+
+        # Scan matches to collect participants per tournament
+        result: dict[int, set] = {}
+        t_ids = matches["tournament_id"].to_list()
+        w_ids = matches["winner_team_id"].to_list()
+        l_ids = matches["loser_team_id"].to_list()
+        for i in range(len(t_ids)):
+            tid = int(t_ids[i])
+            participants = result.setdefault(tid, set())
+            for team_id in (int(w_ids[i]), int(l_ids[i])):
+                roster = roster_lookup.get((tid, team_id))
+                if roster:
+                    participants.update(roster)
+
+        return {tid: list(pids) for tid, pids in result.items()}
 
     # ------------------------------------------------------ legacy-compatible tock
     def _compute_tournament_influence_compat(

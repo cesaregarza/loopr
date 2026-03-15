@@ -152,7 +152,10 @@ def _build_player_edges_normalized(
     beta: float = 0.0,
     timestamp_column: str | None = None,
 ) -> pl.DataFrame:
-    """Internal player-edge construction for already-normalized inputs."""
+    """Internal player-edge construction for already-normalized inputs.
+
+    Uses a dict-based roster lookup to avoid repeated Polars joins.
+    """
     if matches.is_empty() or players.is_empty():
         return pl.DataFrame([])
 
@@ -161,72 +164,43 @@ def _build_player_edges_normalized(
         timestamp_column=timestamp_column,
     )
 
-    # Player selection for joins
-    player_selection = players.select(
+    # Build roster lookup: (tournament_id, team_id) → list[user_id]
+    roster_lookup: dict[tuple[int, int], list] = {}
+    for row in players.select(
         ["tournament_id", "team_id", "user_id"]
-    ).with_columns(
-        [
-            pl.col("tournament_id").cast(pl.Int64),
-            pl.col("team_id").cast(pl.Int64),
-        ]
-    )
+    ).iter_rows():
+        key = (int(row[0]), int(row[1]))
+        roster_lookup.setdefault(key, []).append(row[2])
 
-    # Expand winning teams to winning players
-    winners = (
-        match_data.select(
-            ["match_id", "tournament_id", "winner_team_id", "match_weight"]
-        )
-        .with_columns(
-            [
-                pl.col("tournament_id").cast(pl.Int64),
-                pl.col("winner_team_id").cast(pl.Int64),
-            ]
-        )
-        .join(
-            player_selection,
-            left_on=["tournament_id", "winner_team_id"],
-            right_on=["tournament_id", "team_id"],
-            how="inner",
-        )
-        .rename({"user_id": "winner_user_id"})
-        .select(["match_id", "winner_user_id", "match_weight"])
-    )
+    # Build loser→winner edges via dict lookup (avoids 3 Polars joins)
+    edge_accum: dict[tuple, float] = {}
+    for row in match_data.select(
+        ["tournament_id", "winner_team_id", "loser_team_id", "match_weight"]
+    ).iter_rows():
+        tid, wtid, ltid, weight = int(row[0]), int(row[1]), int(row[2]), float(row[3])
+        winner_players = roster_lookup.get((tid, wtid), [])
+        loser_players = roster_lookup.get((tid, ltid), [])
+        for lp in loser_players:
+            for wp in winner_players:
+                key = (lp, wp)
+                edge_accum[key] = edge_accum.get(key, 0.0) + weight
 
-    # Expand losing teams to losing players
-    losers = (
-        match_data.select(
-            ["match_id", "tournament_id", "loser_team_id", "match_weight"]
-        )
-        .with_columns(
-            [
-                pl.col("tournament_id").cast(pl.Int64),
-                pl.col("loser_team_id").cast(pl.Int64),
-            ]
-        )
-        .join(
-            player_selection,
-            left_on=["tournament_id", "loser_team_id"],
-            right_on=["tournament_id", "team_id"],
-            how="inner",
-        )
-        .rename({"user_id": "loser_user_id"})
-        .select(["match_id", "loser_user_id", "match_weight"])
-    )
-
-    # Create player-to-player pairs
-    pairs = losers.join(winners, on="match_id", how="inner").select(
-        ["loser_user_id", "winner_user_id", "match_weight"]
-    )
-
-    if pairs.is_empty():
+    if not edge_accum:
         return pl.DataFrame([])
 
-    # Aggregate raw pair weights
-    edges = pairs.group_by(["loser_user_id", "winner_user_id"]).agg(
-        pl.col("match_weight").sum().alias("weight_sum")
-    )
+    losers, winners, weights = [], [], []
+    for (lp, wp), w in edge_accum.items():
+        losers.append(lp)
+        winners.append(wp)
+        weights.append(w)
 
-    return edges
+    return pl.DataFrame(
+        {
+            "loser_user_id": losers,
+            "winner_user_id": winners,
+            "weight_sum": weights,
+        }
+    )
 
 
 def build_team_edges(
@@ -283,75 +257,93 @@ def _build_team_edges_normalized(
 
 def build_exposure_triplets(
     matches_dataframe: pl.DataFrame,
-    node_to_index: dict[Any, int],
+    node_to_index: dict[Any, int] | None = None,
+    *,
+    index_mapping: pl.DataFrame | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Produce COO triplets (row=winner_idx, col=loser_idx, data=share).
 
-    Uses list-explode to form the cartesian product winner×loser per match.
+    Uses list-explode to form the cartesian product winner×loser per match,
+    then maps IDs to indices via dict lookup (avoids Polars join overhead).
 
     Args:
         matches_dataframe: DataFrame with winners, losers, share columns.
         node_to_index: Mapping from node IDs to indices.
+        index_mapping: Polars DataFrame lookup (used only to extract dict if
+            node_to_index is not provided).
 
     Returns:
         Tuple of (row_indices, col_indices, weights).
     """
-    # Explode both lists to pairs
+    # Resolve the dict lookup
+    if node_to_index is None:
+        if index_mapping is None:
+            raise ValueError("node_to_index or index_mapping is required")
+        if index_mapping.is_empty():
+            return (
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.float64),
+            )
+        node_to_index = dict(
+            zip(index_mapping["id"].to_list(), index_mapping["idx"].to_list())
+        )
+    else:
+        node_to_index = {k: v for k, v in node_to_index.items() if k is not None}
+        if not node_to_index:
+            return (
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.float64),
+            )
+
+    # Explode both lists to pairs — single Polars operation
     pairs = (
         matches_dataframe.explode("winners")
         .explode("losers")
-        .select(
-            [
-                pl.col("winners").alias("winner_id"),
-                pl.col("losers").alias("loser_id"),
-                "share",
-            ]
-        )
+        .select(["winners", "losers", "share"])
     )
 
-    # Map IDs to indices - ensure proper dtypes
-    valid_items = [
-        (key, value) for key, value in node_to_index.items() if key is not None
-    ]
-    if not valid_items:
+    # Extract raw arrays and map IDs via dict (avoid two Polars joins)
+    winner_ids = pairs["winners"].to_list()
+    loser_ids = pairs["losers"].to_list()
+    shares = pairs["share"].to_numpy()
+
+    # Vectorized dict lookup with filtering
+    n = len(winner_ids)
+    row_buf = np.empty(n, dtype=np.int64)
+    col_buf = np.empty(n, dtype=np.int64)
+    wt_buf = np.empty(n, dtype=np.float64)
+    count = 0
+    _get = node_to_index.get
+    for i in range(n):
+        w_idx = _get(winner_ids[i])
+        l_idx = _get(loser_ids[i])
+        if w_idx is not None and l_idx is not None:
+            row_buf[count] = w_idx
+            col_buf[count] = l_idx
+            wt_buf[count] = shares[i]
+            count += 1
+
+    if count == 0:
         return (
             np.array([], dtype=np.int64),
             np.array([], dtype=np.int64),
             np.array([], dtype=np.float64),
         )
 
-    node_ids, node_indices = zip(*valid_items)
-    index_mapping = pl.DataFrame(
-        {"id": list(node_ids), "idx": list(node_indices)}
-    )
+    rows = row_buf[:count]
+    cols = col_buf[:count]
+    wts = wt_buf[:count]
 
-    # Ensure winner_id and loser_id have matching dtypes with id column
-    id_dtype = index_mapping["id"].dtype
-    pairs = pairs.with_columns(
-        [pl.col("winner_id").cast(id_dtype), pl.col("loser_id").cast(id_dtype)]
-    )
+    # Aggregate duplicate (row, col) pairs using scipy sparse
+    from scipy.sparse import coo_matrix
 
-    pairs = (
-        pairs.join(
-            index_mapping, left_on="winner_id", right_on="id", how="inner"
-        )
-        .rename({"idx": "winner_idx"})
-        .join(index_mapping, left_on="loser_id", right_on="id", how="inner")
-        .rename({"idx": "loser_idx"})
-        .select(["winner_idx", "loser_idx", "share"])
-    )
+    n_nodes = max(node_to_index.values()) + 1
+    coo = coo_matrix((wts, (rows, cols)), shape=(n_nodes, n_nodes))
+    coo.sum_duplicates()
 
-    # Aggregate duplicate pairs
-    pairs = pairs.group_by(["winner_idx", "loser_idx"]).agg(
-        pl.col("share").sum().alias("weight_sum")
-    )
-
-    # Convert to numpy arrays
-    row_indices = pairs["winner_idx"].to_numpy()
-    col_indices = pairs["loser_idx"].to_numpy()
-    weights = pairs["weight_sum"].to_numpy()
-
-    return row_indices, col_indices, weights
+    return coo.row.astype(np.int64), coo.col.astype(np.int64), coo.data
 
 
 def compute_denominators(
@@ -363,6 +355,8 @@ def compute_denominators(
 ) -> pl.DataFrame:
     """Compute denominators with smoothing for edge normalization.
 
+    Uses dict-based aggregation to avoid Polars group_by + join overhead.
+
     Args:
         edges: Edge DataFrame.
         smoothing_strategy: Smoothing strategy object with denom() method.
@@ -373,48 +367,41 @@ def compute_denominators(
     Returns:
         DataFrame with columns: node_id, loss_weights, win_weights, denom, lambda.
     """
-    # Compute loss mass (outgoing edges)
-    loss_totals = edges.group_by(loser_column).agg(
-        pl.col(weight_column).sum().alias("loss_weights")
-    )
+    # Aggregate loss and win weights via dict (avoids 2 group_bys + 1 join)
+    loss_sums: dict = {}
+    win_sums: dict = {}
+    loser_ids = edges[loser_column].to_list()
+    winner_ids = edges[winner_column].to_list()
+    wts = edges[weight_column].to_numpy()
 
-    # Compute win mass (incoming edges)
-    win_totals = (
-        edges.group_by(winner_column)
-        .agg(pl.col(weight_column).sum().alias("win_weights"))
-        .rename({winner_column: loser_column})
-    )
+    for i in range(len(loser_ids)):
+        w = float(wts[i])
+        lid = loser_ids[i]
+        wid = winner_ids[i]
+        loss_sums[lid] = loss_sums.get(lid, 0.0) + w
+        win_sums[wid] = win_sums.get(wid, 0.0) + w
 
-    # Join and fill nulls
-    denominators = loss_totals.join(
-        win_totals,
-        on=loser_column,
-        how="left",
-        coalesce=True,
-    ).with_columns(pl.col("win_weights").fill_null(0.0))
+    node_ids = sorted(loss_sums.keys())
+    loss_arr = np.array([loss_sums[n] for n in node_ids], dtype=float)
+    win_arr = np.array([win_sums.get(n, 0.0) for n in node_ids], dtype=float)
 
     # Apply smoothing strategy
     if smoothing_strategy:
-        loss_weights_array = denominators["loss_weights"].to_numpy()
-        win_weights_array = denominators["win_weights"].to_numpy()
-        denominator_values = smoothing_strategy.denom(
-            loss_weights_array, win_weights_array
-        )
-
-        denominators = denominators.with_columns(
-            pl.Series("denom", denominator_values)
-        )
+        denom_arr = smoothing_strategy.denom(loss_arr, win_arr)
     else:
-        denominators = denominators.with_columns(
-            pl.col("loss_weights").alias("denom")
-        )
+        denom_arr = loss_arr.copy()
 
-    # Compute lambda (smoothing term)
-    denominators = denominators.with_columns(
-        (pl.col("denom") - pl.col("loss_weights")).alias("lambda")
+    lambda_arr = denom_arr - loss_arr
+
+    return pl.DataFrame(
+        {
+            loser_column: node_ids,
+            "loss_weights": loss_arr,
+            "win_weights": win_arr,
+            "denom": denom_arr,
+            "lambda": lambda_arr,
+        }
     )
-
-    return denominators
 
 
 def normalize_edges(
@@ -425,6 +412,8 @@ def normalize_edges(
 ) -> pl.DataFrame:
     """Normalize edge weights by denominators.
 
+    Uses dict lookup instead of Polars join for speed.
+
     Args:
         edges: Edge DataFrame.
         denominators: Denominator DataFrame.
@@ -434,20 +423,25 @@ def normalize_edges(
     Returns:
         Normalized edge DataFrame.
     """
-    # Join denominators
-    edges = edges.join(
-        denominators.select([loser_column, "denom"]),
-        on=loser_column,
-        how="left",
-        coalesce=True,
+    # Build denom lookup from small DataFrame
+    denom_dict = dict(
+        zip(
+            denominators[loser_column].to_list(),
+            denominators["denom"].to_list(),
+        )
     )
 
-    # Normalize weights
-    edges = edges.with_columns(
-        (pl.col(weight_column) / pl.col("denom")).alias("normalized_weight")
-    )
+    loser_ids = edges[loser_column].to_list()
+    wts = edges[weight_column].to_numpy()
+    normalized = np.empty(len(wts), dtype=float)
+    for i, lid in enumerate(loser_ids):
+        d = denom_dict.get(lid, 1.0)
+        normalized[i] = wts[i] / d if d != 0.0 else 0.0
 
-    return edges
+    return edges.with_columns(
+        pl.Series("normalized_weight", normalized),
+        pl.Series("denom", [denom_dict.get(lid, 1.0) for lid in loser_ids]),
+    )
 
 
 def edges_to_triplets(
@@ -459,6 +453,8 @@ def edges_to_triplets(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Convert edge DataFrame to COO triplets.
 
+    Uses direct dict lookup instead of Polars joins for speed.
+
     Args:
         edges: Edge DataFrame.
         node_to_index: Node ID to index mapping.
@@ -469,24 +465,23 @@ def edges_to_triplets(
     Returns:
         Tuple of (row_indices, col_indices, weights).
     """
-    # Map node IDs to indices
-    index_mapping = pl.DataFrame(
-        {"id": list(node_to_index.keys()), "idx": list(node_to_index.values())}
-    )
+    src_ids = edges[source_column].to_list()
+    tgt_ids = edges[target_column].to_list()
+    wts = edges[weight_column].to_numpy()
 
-    # Join to get indices
-    edges_with_indices = (
-        edges.join(
-            index_mapping, left_on=source_column, right_on="id", how="inner"
-        )
-        .rename({"idx": "source_idx"})
-        .join(index_mapping, left_on=target_column, right_on="id", how="inner")
-        .rename({"idx": "target_idx"})
-    )
+    n = len(src_ids)
+    row_buf = np.empty(n, dtype=np.int64)
+    col_buf = np.empty(n, dtype=np.int64)
+    wt_buf = np.empty(n, dtype=np.float64)
+    count = 0
+    _get = node_to_index.get
+    for i in range(n):
+        s_idx = _get(src_ids[i])
+        t_idx = _get(tgt_ids[i])
+        if s_idx is not None and t_idx is not None:
+            row_buf[count] = s_idx
+            col_buf[count] = t_idx
+            wt_buf[count] = wts[i]
+            count += 1
 
-    # Extract arrays
-    row_indices = edges_with_indices["source_idx"].to_numpy()
-    col_indices = edges_with_indices["target_idx"].to_numpy()
-    weights = edges_with_indices[weight_column].to_numpy()
-
-    return row_indices, col_indices, weights
+    return row_buf[:count], col_buf[:count], wt_buf[:count]

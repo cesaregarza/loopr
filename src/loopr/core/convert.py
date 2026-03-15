@@ -111,140 +111,87 @@ def _convert_matches_dataframe_normalized(
 
     match_data = match_data.rename({"match_weight": "weight"})
 
-    # Build baseline roster lists (team-level) for fallback
-    if rosters is None:
-        used_teams = pl.concat(
-            [
-                match_data.select(pl.col("winner_team_id").alias("team_id")),
-                match_data.select(pl.col("loser_team_id").alias("team_id")),
-            ]
-        ).unique()
+    # Build roster lookup: (tournament_id, team_id) → list[user_id]
+    roster_lookup: dict[tuple[int, int], list] = {}
+    if rosters is not None:
+        for row in rosters.select(
+            ["tournament_id", "team_id", "user_id"]
+        ).iter_rows():
+            roster_lookup.setdefault((int(row[0]), int(row[1])), []).append(row[2])
+    else:
+        for row in players.select(
+            ["tournament_id", "team_id", "user_id"]
+        ).iter_rows():
+            roster_lookup.setdefault((int(row[0]), int(row[1])), []).append(row[2])
 
-        rosters = players.join(
-            used_teams, left_on="team_id", right_on="team_id", how="inner"
-        ).select(["tournament_id", "team_id", "user_id"])
-
-    roster_lists = rosters.group_by(["tournament_id", "team_id"]).agg(
-        pl.col("user_id").alias("roster")
-    )
-
-    # Optional: override winners/losers with actual per-match appearances when available
     winners_col = "winners"
     losers_col = "losers"
+
     if appearances is not None and not appearances.is_empty():
-        # Ensure dtypes and group to per-match team lists
-        # Accept appearances missing team_id (derive from rosters)
-        base_cols = [
-            pl.col("tournament_id").cast(pl.Int64).alias("tournament_id"),
-            pl.col("match_id").cast(pl.Int64).alias("match_id"),
-            pl.col("user_id").cast(pl.Int64).alias("user_id"),
-        ]
+        # Build appearance lookup: (tournament_id, match_id, team_id) → list[user_id]
+        # First resolve team_id if missing
         has_team_id = "team_id" in appearances.columns
         if has_team_id:
-            base_cols.append(pl.col("team_id").cast(pl.Int64).alias("team_id"))
-        appearances_norm = appearances.select(base_cols)
+            app_rows = appearances.select(
+                ["tournament_id", "match_id", "team_id", "user_id"]
+            ).iter_rows()
+        else:
+            # Build user→team lookup from rosters for team derivation
+            user_team_lookup: dict[tuple[int, int], int] = {}
+            for row in players.select(
+                ["tournament_id", "user_id", "team_id"]
+            ).iter_rows():
+                user_team_lookup[(int(row[0]), row[1])] = int(row[2])
 
-        # Derive team_id from rosters if missing (or null)
-        if (not has_team_id) or appearances_norm.select(
-            pl.col("team_id").is_null().any()
-        ).item():
-            # Join on (tournament_id, user_id) to fetch team_id from rosters
-            appearances_norm = appearances_norm.join(
-                rosters,
-                on=["tournament_id", "user_id"],
-                how="left",
-                coalesce=True,
-            )
-            # After join, ensure column name is 'team_id' (normalize suffixes)
-            if "team_id_right" in appearances_norm.columns:
-                appearances_norm = appearances_norm.with_columns(
-                    pl.coalesce(
-                        [pl.col("team_id"), pl.col("team_id_right")]
-                    ).alias("team_id")
-                ).drop(
-                    [
-                        c
-                        for c in ["team_id_right"]
-                        if c in appearances_norm.columns
-                    ]
-                )
+            def _app_with_team():
+                for row in appearances.select(
+                    ["tournament_id", "match_id", "user_id"]
+                ).iter_rows():
+                    tid = int(row[0])
+                    team = user_team_lookup.get((tid, row[2]))
+                    if team is not None:
+                        yield (tid, int(row[1]), team, row[2])
 
-        # Now group by (tournament_id, match_id, team_id)
-        appearance_lists_df = (
-            appearances_norm.drop_nulls(["team_id"])
-            .group_by(["tournament_id", "match_id", "team_id"])
-            .agg(pl.col("user_id").alias("played"))
-        )
+            app_rows = _app_with_team()
 
-        # Join baseline rosters to compute fallbacks if appearance missing
-        match_data = match_data.join(
-            roster_lists,
-            left_on=["tournament_id", "winner_team_id"],
-            right_on=["tournament_id", "team_id"],
-            how="left",
-            coalesce=True,
-        ).rename({"roster": "_w_roster"})
+        appearance_lookup: dict[tuple[int, int, int], list] = {}
+        for row in app_rows:
+            key = (int(row[0]), int(row[1]), int(row[2]))
+            appearance_lookup.setdefault(key, []).append(row[3])
 
-        match_data = match_data.join(
-            roster_lists,
-            left_on=["tournament_id", "loser_team_id"],
-            right_on=["tournament_id", "team_id"],
-            how="left",
-            coalesce=True,
-        ).rename({"roster": "_l_roster"})
+        # Assign winners/losers using appearances with roster fallback
+        winner_lists, loser_lists = [], []
+        for row in match_data.select(
+            ["tournament_id", "match_id", "winner_team_id", "loser_team_id"]
+        ).iter_rows():
+            tid, mid, wtid, ltid = int(row[0]), int(row[1]), int(row[2]), int(row[3])
+            w_played = appearance_lookup.get((tid, mid, wtid))
+            l_played = appearance_lookup.get((tid, mid, ltid))
+            winner_lists.append(w_played or roster_lookup.get((tid, wtid)))
+            loser_lists.append(l_played or roster_lookup.get((tid, ltid)))
 
-        # Attach appearances for winners and losers
-        match_data = match_data.join(
-            appearance_lists_df,
-            left_on=["tournament_id", "match_id", "winner_team_id"],
-            right_on=["tournament_id", "match_id", "team_id"],
-            how="left",
-            coalesce=True,
-        ).rename({"played": "_w_played"})
-        match_data = match_data.join(
-            appearance_lists_df,
-            left_on=["tournament_id", "match_id", "loser_team_id"],
-            right_on=["tournament_id", "match_id", "team_id"],
-            how="left",
-            coalesce=True,
-        ).rename({"played": "_l_played"})
-
-        # Coalesce: prefer played-over-roster
         match_data = match_data.with_columns(
             [
-                pl.coalesce([pl.col("_w_played"), pl.col("_w_roster")]).alias(
-                    winners_col
-                ),
-                pl.coalesce([pl.col("_l_played"), pl.col("_l_roster")]).alias(
-                    losers_col
-                ),
-            ]
-        )
-        # Drop temp columns
-        match_data = match_data.drop(
-            [
-                c
-                for c in ["_w_roster", "_l_roster", "_w_played", "_l_played"]
-                if c in match_data.columns
+                pl.Series(winners_col, winner_lists),
+                pl.Series(losers_col, loser_lists),
             ]
         )
     else:
-        # No appearances provided; use team rosters
-        match_data = match_data.join(
-            roster_lists,
-            left_on=["tournament_id", "winner_team_id"],
-            right_on=["tournament_id", "team_id"],
-            how="left",
-            coalesce=True,
-        ).rename({"roster": winners_col})
+        # No appearances — use dict-based roster lookup (avoids 2 Polars joins)
+        winner_lists, loser_lists = [], []
+        for row in match_data.select(
+            ["tournament_id", "winner_team_id", "loser_team_id"]
+        ).iter_rows():
+            tid, wtid, ltid = int(row[0]), int(row[1]), int(row[2])
+            winner_lists.append(roster_lookup.get((tid, wtid)))
+            loser_lists.append(roster_lookup.get((tid, ltid)))
 
-        match_data = match_data.join(
-            roster_lists,
-            left_on=["tournament_id", "loser_team_id"],
-            right_on=["tournament_id", "team_id"],
-            how="left",
-            coalesce=True,
-        ).rename({"roster": losers_col})
+        match_data = match_data.with_columns(
+            [
+                pl.Series(winners_col, winner_lists),
+                pl.Series(losers_col, loser_lists),
+            ]
+        )
 
     match_data = match_data.filter(
         pl.col(winners_col).is_not_null() & pl.col(losers_col).is_not_null()

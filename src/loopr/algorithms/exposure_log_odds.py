@@ -7,6 +7,9 @@ import numpy as np
 import polars as pl
 
 from loopr.algorithms._log_odds_common import (
+    aggregate_entity_metrics,
+    build_index_mapping,
+    last_activity_from_metrics,
     merged_node_ids,
     reporting_exposure,
     resolve_lambda,
@@ -128,11 +131,17 @@ class ExposureLogOddsEngine:
             )
             return pl.DataFrame()
 
+        entity_metrics = aggregate_entity_metrics(mdf)
+
         # 3) Restrict nodes to active players, but always include those who actually
         #    appeared in matches (subs, late adds). This unions the tick‑tock set
         #    with the IDs present in winners/losers after conversion.
         #    This ensures valid appearance-only players are not dropped.
-        node_ids = merged_node_ids(mdf, active_players)
+        node_ids = merged_node_ids(
+            mdf,
+            active_players,
+            aggregated_metrics=entity_metrics,
+        )
         if not node_ids:
             self.logger.warning(
                 "No active or appeared players after union; returning empty result."
@@ -140,13 +149,22 @@ class ExposureLogOddsEngine:
             return pl.DataFrame()
         node_to_idx = {pid: idx for idx, pid in enumerate(node_ids)}
         num_nodes = len(node_ids)
+        index_mapping = build_index_mapping(node_to_idx)
 
         # 4) Build teleport ρ from exposure mass
-        rho = teleport_from_share(mdf, node_to_idx)
+        rho = teleport_from_share(
+            mdf,
+            node_to_idx,
+            aggregated_metrics=entity_metrics,
+            index_mapping=index_mapping,
+        )
         self._last_rho = rho
 
         # 5) Triplets for A_win (loser -> winner), then mirror for A_loss
-        rows, cols, data = build_exposure_triplets(mdf, node_to_idx)
+        rows, cols, data = build_exposure_triplets(
+            mdf,
+            index_mapping=index_mapping,
+        )
 
         pr_cfg = PageRankConfig(
             alpha=self.config.pagerank.alpha,
@@ -185,7 +203,11 @@ class ExposureLogOddsEngine:
 
         # 9) Inactivity decay
         if self.config.engine.score_decay_rate > 0:
-            last_ts = self._last_activity_times(mdf, node_to_idx, num_nodes)
+            last_ts = self._last_activity_times(
+                entity_metrics,
+                index_mapping,
+                num_nodes,
+            )
             scores = apply_inactivity_decay(
                 scores,
                 last_ts,
@@ -195,7 +217,12 @@ class ExposureLogOddsEngine:
             )
 
         # 10) Calculate reporting exposure
-        exposure = reporting_exposure(mdf, node_to_idx)
+        exposure = reporting_exposure(
+            mdf,
+            node_to_idx,
+            aggregated_metrics=entity_metrics,
+            index_mapping=index_mapping,
+        )
 
         # 11) Apply minimum exposure filter if configured
         mask = np.ones(num_nodes, dtype=bool)
@@ -207,14 +234,14 @@ class ExposureLogOddsEngine:
             pl.DataFrame(
                 {
                     "id": node_ids,
-                    "player_rank": scores.tolist(),
-                    "score": scores.tolist(),
-                    "win_pr": win_pagerank.tolist(),
-                    "loss_pr": loss_pagerank.tolist(),
-                    "exposure": exposure.tolist(),
+                    "player_rank": scores,
+                    "score": scores,
+                    "win_pr": win_pagerank,
+                    "loss_pr": loss_pagerank,
+                    "exposure": exposure,
                 }
             )
-            .filter(pl.Series(mask.tolist()))
+            .filter(pl.Series("active", mask))
             .sort("player_rank", descending=True)
         )
 
@@ -440,41 +467,23 @@ class ExposureLogOddsEngine:
 
     def _last_activity_times(
         self,
-        matches_df: pl.DataFrame,
-        node_to_idx: dict[int, int],
+        entity_metrics: pl.DataFrame,
+        index_mapping: pl.DataFrame,
         num_nodes: int,
     ) -> np.ndarray:
         """Get the last activity timestamp for each player.
 
         Args:
-            matches_df: DataFrame containing match data.
-            node_to_idx: Mapping from node IDs to indices.
+            entity_metrics: Aggregated per-entity metrics.
+            index_mapping: Materialized ID->index lookup.
             num_nodes: Total number of nodes.
 
         Returns:
             Array of last activity timestamps.
         """
-        last_ts = np.zeros(num_nodes, dtype=float)
-
-        winners_ts = (
-            matches_df.select(["winners", "ts"])
-            .explode("winners")
-            .rename({"winners": "id"})
+        return last_activity_from_metrics(
+            entity_metrics,
+            index_mapping,
+            num_nodes,
+            self.clock.now,
         )
-        losers_ts = (
-            matches_df.select(["losers", "ts"])
-            .explode("losers")
-            .rename({"losers": "id"})
-        )
-        ts_df = (
-            pl.concat([winners_ts, losers_ts])
-            .group_by("id")
-            .agg(pl.col("ts").max().alias("last_ts"))
-        )
-        for row in ts_df.iter_rows(named=True):
-            idx = node_to_idx.get(row["id"])
-            if idx is not None:
-                last_ts[idx] = float(row["last_ts"])
-
-        last_ts[last_ts == 0.0] = float(self.clock.now)
-        return last_ts

@@ -31,3 +31,23 @@ def test_convert_matches_neutral_appearances_override_rosters(
 
     assert set(df["winners"][0]) == {1, 2}
     assert set(df["losers"][0]) == {5, 6}
+
+
+def test_convert_matches_derives_missing_appearance_team_ids(
+    single_match_neutral_tables,
+):
+    appearances_without_groups = single_match_neutral_tables[
+        "appearances"
+    ].drop("group_id")
+
+    df = convert_matches_dataframe(
+        single_match_neutral_tables["matches"],
+        single_match_neutral_tables["participants"],
+        tournament_influence={},
+        now_timestamp=1_700_000_100.0,
+        decay_rate=0.0,
+        appearances=appearances_without_groups,
+    )
+
+    assert set(df["winners"][0]) == {1, 2}
+    assert set(df["losers"][0]) == {5, 6}

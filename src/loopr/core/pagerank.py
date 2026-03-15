@@ -43,11 +43,14 @@ def pagerank_sparse(
     nonzero_mask = sums > 0
     inverse_sums[nonzero_mask] = 1.0 / sums[nonzero_mask]
 
+    # Pre-compute transpose once instead of per iteration
+    if cfg.orientation == "row":
+        _mat = adjacency_matrix.T.tocsr()
+    else:
+        _mat = adjacency_matrix
+
     def multiply(vector: np.ndarray) -> np.ndarray:
-        if cfg.orientation == "row":
-            return adjacency_matrix.T.dot(vector * inverse_sums)
-        else:
-            return adjacency_matrix.dot(vector * inverse_sums)
+        return _mat.dot(vector * inverse_sums)
 
     rank_vector = teleport / teleport.sum()
     alpha = cfg.alpha

@@ -118,18 +118,32 @@ class TTLEngine:
 
         influence_history = []
         rating_result = None
+        participants_indexed: dict[int, list[int]] | None = None
 
         while iteration < max_iterations:
             self.logger.info(f"TTL iteration {iteration + 1}")
 
             # TICK: Compute ratings with current tournament influences
             self.logger.debug("Computing ratings with current influences...")
-            rating_result = self.backend.compute(
-                matches,
-                players,
-                [],  # active_ids not used by log-odds backend
-                self.tournament_influence,
+            backend_compute_normalized = getattr(
+                self.backend,
+                "compute_normalized",
+                None,
             )
+            if callable(backend_compute_normalized):
+                rating_result = backend_compute_normalized(
+                    matches,
+                    players,
+                    [],  # active_ids not used by log-odds backend
+                    self.tournament_influence,
+                )
+            else:
+                rating_result = self.backend.compute(
+                    matches,
+                    players,
+                    [],  # active_ids not used by log-odds backend
+                    self.tournament_influence,
+                )
 
             if rating_result.is_empty():
                 self.logger.warning("Empty rating result, stopping")
@@ -138,21 +152,26 @@ class TTLEngine:
             # TOCK: Update tournament influences using quality_mass
             self.logger.debug("Updating tournament influences...")
 
-            # Map player IDs to indices for influence computation
-            player_to_idx = {
-                row["id"]: idx
-                for idx, row in enumerate(rating_result.iter_rows(named=True))
-            }
-
-            # Convert participants to indices
-            participants_indexed = {}
-            for tid, player_ids in participants.items():
-                indices = []
-                for pid in player_ids:
-                    if pid in player_to_idx:
-                        indices.append(player_to_idx[pid])
-                if indices:
-                    participants_indexed[tid] = indices
+            if participants_indexed is None:
+                player_to_idx = {
+                    player_id: idx
+                    for idx, player_id in enumerate(
+                        rating_result["id"].to_list()
+                    )
+                }
+                participants_indexed = {
+                    tid: [
+                        player_to_idx[player_id]
+                        for player_id in player_ids
+                        if player_id in player_to_idx
+                    ]
+                    for tid, player_ids in participants.items()
+                }
+                participants_indexed = {
+                    tid: indices
+                    for tid, indices in participants_indexed.items()
+                    if indices
+                }
 
             # Get quality mass array
             quality_mass = rating_result["quality_mass"].to_numpy()
@@ -262,8 +281,8 @@ class TTLEngine:
         result_df = pl.DataFrame(
             {
                 "player_id": player_ids,
-                "score": scores.tolist(),
-                "active": mask.tolist(),
+                "score": scores,
+                "active": mask,
             }
         )
 
@@ -305,11 +324,12 @@ class TTLEngine:
             .agg(pl.col("user_id").alias("participants"))
         )
 
-        result = {}
-        for row in participants.iter_rows(named=True):
-            result[row["tournament_id"]] = row["participants"]
-
-        return result
+        return dict(
+            zip(
+                participants["tournament_id"].to_list(),
+                participants["participants"].to_list(),
+            )
+        )
 
     def _get_last_activity_times(
         self,
