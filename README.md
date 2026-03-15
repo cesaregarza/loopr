@@ -58,3 +58,7 @@ participants = pl.DataFrame(
 engine = LOOPREngine()
 rankings = engine.rank_entities(matches, participants)
 ```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
