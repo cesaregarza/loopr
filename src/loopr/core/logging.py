@@ -94,8 +94,8 @@ def log_timing(
 
     Examples:
         >>> logger = get_logger(__name__)
-        >>> with log_timing(logger, "computing player rankings"):
-        ...     rankings = engine.rank_players(matches_df, players_df)
+        >>> with log_timing(logger, "computing entity rankings"):
+        ...     rankings = engine.rank_entities(matches_df, participants_df)
     """
     start_time = time.time()
     logger.log(level, f"Starting {operation}")

@@ -20,10 +20,6 @@ from loopr.core import (
 )
 from loopr.schema import (
     NormalizedRankingInputs,
-    normalize_appearances_schema,
-    normalize_matches_schema,
-    normalize_participants_schema,
-    normalize_rank_inputs,
     prepare_rank_inputs,
 )
 
@@ -43,10 +39,6 @@ __all__ = [
     "TickTockEngine",
     "TickTockResult",
     "convert_matches_dataframe",
-    "normalize_appearances_schema",
-    "normalize_matches_schema",
-    "normalize_participants_schema",
-    "normalize_rank_inputs",
     "prepare_rank_inputs",
 ]
 

@@ -578,7 +578,7 @@ class LOOAnalyzer:
     """
     Leave-One-Match-Out analyzer for ExposureLogOddsEngine.
 
-    Computes exact impact of removing a single match on player scores
+    Computes exact impact of removing a single match on entity scores
     using efficient rank-k updates instead of full PageRank recomputation.
     """
 
@@ -620,9 +620,9 @@ class LOOAnalyzer:
         Initialize LOO analyzer from engine state.
 
         Args:
-            engine: ExposureLogOddsEngine instance after rank_players()
+            engine: ExposureLogOddsEngine instance after rank_entities()
             matches_df: Processed matches DataFrame with winners/losers lists
-            players_df: Players DataFrame
+            players_df: Participant DataFrame used for node expansion
         """
         # Core parameters
         self.alpha = float(engine.config.pagerank.alpha)
@@ -750,11 +750,11 @@ class LOOAnalyzer:
             self._total_exposure,
         )
 
-    def node_index_for_player(self, player_id: int) -> Optional[int]:
-        """Get node index for player ID."""
-        return self.node_to_idx.get(player_id, None)
+    def node_index_for_entity(self, entity_id: int) -> Optional[int]:
+        """Get node index for an entity ID."""
+        return self.node_to_idx.get(entity_id, None)
 
-    def _estimate_match_flux(self, match_id: int, player_id: int) -> float:
+    def _estimate_match_flux(self, match_id: int, entity_id: int) -> float:
         """
         Estimate flux for a match without full LOO computation.
 
@@ -763,7 +763,7 @@ class LOOAnalyzer:
 
         Args:
             match_id: Match to estimate
-            player_id: Player of interest
+            entity_id: Entity of interest
 
         Returns:
             Estimated flux magnitude
@@ -775,58 +775,58 @@ class LOOAnalyzer:
 
         rows_w, cols_w, wts_w, rows_l, cols_l, wts_l, _ = match_data
 
-        player_idx = self.node_index_for_player(player_id)
-        if player_idx is None:
+        entity_idx = self.node_index_for_entity(entity_id)
+        if entity_idx is None:
             return 0.0
 
         total_flux = 0.0
 
         # Estimate win flux (incoming to player if they won)
         for i, j, w in zip(rows_w, cols_w, wts_w):
-            if i == player_idx:  # Player is winner (receives flux)
+            if i == entity_idx:
                 if self.T_win[j] > 0:
                     flux = self.alpha * self.s_win[j] * (w / self.T_win[j])
                     total_flux += flux
-            elif j == player_idx:  # Player is loser (source of flux)
-                if self.T_win[player_idx] > 0:
+            elif j == entity_idx:
+                if self.T_win[entity_idx] > 0:
                     flux = (
                         self.alpha
-                        * self.s_win[player_idx]
-                        * (w / self.T_win[player_idx])
+                        * self.s_win[entity_idx]
+                        * (w / self.T_win[entity_idx])
                     )
                     total_flux += flux
 
         # Estimate loss flux (incoming to player if they lost)
         for i, j, w in zip(rows_l, cols_l, wts_l):
-            if i == player_idx:  # Player is loser (receives flux in loss graph)
+            if i == entity_idx:
                 if self.T_loss[j] > 0:
                     flux = self.alpha * self.s_loss[j] * (w / self.T_loss[j])
                     total_flux += flux
-            elif j == player_idx:  # Player is winner (source in loss graph)
-                if self.T_loss[player_idx] > 0:
+            elif j == entity_idx:
+                if self.T_loss[entity_idx] > 0:
                     flux = (
                         self.alpha
-                        * self.s_loss[player_idx]
-                        * (w / self.T_loss[player_idx])
+                        * self.s_loss[entity_idx]
+                        * (w / self.T_loss[entity_idx])
                     )
                     total_flux += flux
 
         return total_flux
 
-    def impact_of_match_on_player(
+    def impact_of_match_on_entity(
         self,
         match_id: int,
-        player_id: int,
+        entity_id: int,
         include_teleport: bool = True,
         tol: float = 1e-10,
         max_iter: int = 400,
     ) -> dict[str, Any]:
         """
-        Compute exact change in player's log-odds score if match is removed.
+        Compute exact change in an entity's log-odds score if match is removed.
 
         Args:
             match_id: Match to remove
-            player_id: Player to analyze
+            entity_id: Entity to analyze
             include_teleport: Whether to account for teleport vector changes
             tol: Convergence tolerance for solvers
             max_iter: Maximum iterations for solvers
@@ -834,11 +834,11 @@ class LOOAnalyzer:
         Returns:
             Dictionary with old/new scores and detailed components
         """
-        k = self.node_index_for_player(player_id)
+        k = self.node_index_for_entity(entity_id)
         if k is None:
             return {
                 "ok": False,
-                "reason": f"player_id {player_id} not found in node mapping",
+                "reason": f"entity_id {entity_id} not found in node mapping",
             }
 
         # Get cached match data
@@ -863,7 +863,7 @@ class LOOAnalyzer:
         delta_rho = delta_rho_cached if include_teleport else None
 
         # Early exit if flux is negligible
-        flux_estimate = self._estimate_match_flux(match_id, player_id)
+        flux_estimate = self._estimate_match_flux(match_id, entity_id)
         if abs(flux_estimate) < 1e-12:
             return {
                 "ok": True,
@@ -950,7 +950,7 @@ class LOOAnalyzer:
 
         return {
             "ok": True,
-            "player_id": player_id,
+            "entity_id": entity_id,
             "match_id": match_id,
             "old": {
                 "score": old_score,
@@ -980,9 +980,9 @@ class LOOAnalyzer:
             },
         }
 
-    def analyze_player_matches(
+    def analyze_entity_matches(
         self,
-        player_id: int,
+        entity_id: int,
         limit: Optional[int] = None,
         include_teleport: bool = True,
         use_flux_ranking: bool = True,
@@ -990,10 +990,10 @@ class LOOAnalyzer:
         max_workers: int = 4,
     ) -> pl.DataFrame:
         """
-        Analyze impact of matches involving a player.
+        Analyze impact of matches involving an entity.
 
         Args:
-            player_id: Player to analyze
+            entity_id: Entity to analyze
             limit: Maximum number of matches to analyze
             include_teleport: Whether to account for teleport changes
             use_flux_ranking: Whether to prioritize matches by pre-computed flux
@@ -1003,8 +1003,7 @@ class LOOAnalyzer:
         Returns:
             DataFrame with match impacts sorted by absolute score change
         """
-        # Find all matches involving this player
-        player_matches = []
+        entity_matches = []
 
         for match in self.matches_df.iter_rows(named=True):
             winners = match.get("winners", [])
@@ -1015,54 +1014,52 @@ class LOOAnalyzer:
             if not isinstance(losers, list):
                 losers = [losers] if losers is not None else []
 
-            if player_id in winners or player_id in losers:
+            if entity_id in winners or entity_id in losers:
                 match_info = {
                     "match_id": match["match_id"],
-                    "is_win": player_id in winners,
+                    "is_win": entity_id in winners,
                     "flux_estimate": 0.0,
                 }
 
                 # If using flux ranking, compute preliminary flux estimate
                 if use_flux_ranking:
                     flux_est = self._estimate_match_flux(
-                        match["match_id"], player_id
+                        match["match_id"], entity_id
                     )
                     match_info["flux_estimate"] = flux_est
 
-                player_matches.append(match_info)
+                entity_matches.append(match_info)
 
         # Sort by flux estimate if using flux ranking
-        if use_flux_ranking and player_matches:
-            player_matches.sort(
+        if use_flux_ranking and entity_matches:
+            entity_matches.sort(
                 key=lambda x: abs(x["flux_estimate"]), reverse=True
             )
 
         if limit:
-            player_matches = player_matches[:limit]
+            entity_matches = entity_matches[:limit]
 
         # Analyze each match
         results = []
 
-        if parallel and len(player_matches) > 1:
+        if parallel and len(entity_matches) > 1:
             # Parallel execution
             def _impact_single(match_info):
-                impact = self.impact_of_match_on_player(
+                impact = self.impact_of_match_on_entity(
                     match_info["match_id"],
-                    player_id,
+                    entity_id,
                     include_teleport=include_teleport,
                 )
                 return match_info, impact
 
             with ThreadPoolExecutor(
-                max_workers=min(max_workers, len(player_matches))
+                max_workers=min(max_workers, len(entity_matches))
             ) as ex:
-                futures = [
-                    ex.submit(_impact_single, mi) for mi in player_matches
-                ]
+                futures = [ex.submit(_impact_single, mi) for mi in entity_matches]
                 for i, fut in enumerate(as_completed(futures)):
                     match_info, impact = fut.result()
                     logger.info(
-                        f"Completed match {i+1}/{len(player_matches)}: {match_info['match_id']}"
+                        f"Completed match {i+1}/{len(entity_matches)}: {match_info['match_id']}"
                     )
 
                     if impact["ok"]:
@@ -1080,14 +1077,14 @@ class LOOAnalyzer:
                         )
         else:
             # Sequential execution
-            for i, match_info in enumerate(player_matches):
+            for i, match_info in enumerate(entity_matches):
                 logger.info(
-                    f"Analyzing match {i+1}/{len(player_matches)}: {match_info['match_id']}"
+                    f"Analyzing match {i+1}/{len(entity_matches)}: {match_info['match_id']}"
                 )
 
-                impact = self.impact_of_match_on_player(
+                impact = self.impact_of_match_on_entity(
                     match_info["match_id"],
-                    player_id,
+                    entity_id,
                     include_teleport=include_teleport,
                 )
 

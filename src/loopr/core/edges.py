@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 
 from loopr.schema import (
-    normalize_matches_schema,
+    prepare_matches_frame,
     prepare_rank_inputs,
 )
 
@@ -222,7 +222,7 @@ def build_team_edges(
     Returns:
         Edge DataFrame with columns: loser_team_id, winner_team_id, weight_sum.
     """
-    matches = normalize_matches_schema(matches)
+    matches = prepare_matches_frame(matches)
     return _build_team_edges_normalized(
         matches,
         tournament_influence,

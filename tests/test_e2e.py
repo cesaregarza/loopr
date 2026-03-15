@@ -339,7 +339,7 @@ class TestLOOAnalyzerValues:
         engine.prepare_loo_analyzer()
 
         # Remove match 10 (team A beats team B) impact on player 1
-        impact = engine.analyze_match_impact(match_id=10, player_id=1)
+        impact = engine.analyze_match_impact(match_id=10, entity_id=1)
         assert impact["ok"] is True
         # Removing a win should decrease (or maintain) score
         assert impact["delta"]["score"] <= 0.01  # should go down or near zero
@@ -352,7 +352,7 @@ class TestLOOAnalyzerValues:
         engine.prepare_loo_analyzer()
 
         # Remove match 10 (team A beats team B) impact on player 3 (loser)
-        impact = engine.analyze_match_impact(match_id=10, player_id=3)
+        impact = engine.analyze_match_impact(match_id=10, entity_id=3)
         assert impact["ok"] is True
         # Removing a loss should increase score
         assert impact["delta"]["score"] >= -0.01  # should go up or near zero
@@ -363,7 +363,7 @@ class TestLOOAnalyzerValues:
         engine.rank_entities(matches, participants)
         engine.prepare_loo_analyzer()
 
-        impact = engine.analyze_match_impact(match_id=10, player_id=1)
+        impact = engine.analyze_match_impact(match_id=10, entity_id=1)
         assert "ok" in impact
         assert "old" in impact
         assert "new" in impact
@@ -372,7 +372,7 @@ class TestLOOAnalyzerValues:
         assert "s_win" in impact["old"]
         assert "s_loss" in impact["old"]
 
-    def test_analyze_player_matches_returns_dataframe(
+    def test_analyze_entity_matches_returns_dataframe(
         self, dominant_player_scenario
     ):
         matches, participants = dominant_player_scenario
@@ -380,7 +380,7 @@ class TestLOOAnalyzerValues:
         engine.rank_entities(matches, participants)
         engine.prepare_loo_analyzer()
 
-        df = engine.analyze_player_matches(player_id=1)
+        df = engine.analyze_entity_matches(entity_id=1)
         assert isinstance(df, pl.DataFrame)
         assert df.height > 0
         assert "match_id" in df.columns
@@ -548,57 +548,6 @@ class TestReproducibility:
         np.testing.assert_allclose(
             r1["score"].to_numpy(), r2["score"].to_numpy()
         )
-
-    def test_legacy_neutral_parity_with_values(self):
-        """Verify legacy and neutral schemas produce identical numeric outputs."""
-        matches_neutral = pl.DataFrame(
-            {
-                "event_id": [1, 1],
-                "match_id": [10, 11],
-                "winner_id": [100, 100],
-                "loser_id": [200, 300],
-                "completed_at": [NOW - DAY, NOW],
-            }
-        )
-        participants_neutral = pl.DataFrame(
-            {
-                "event_id": [1] * 6,
-                "group_id": [100, 100, 200, 200, 300, 300],
-                "entity_id": [1, 2, 3, 4, 5, 6],
-            }
-        )
-        matches_legacy = matches_neutral.rename(
-            {
-                "event_id": "tournament_id",
-                "winner_id": "winner_team_id",
-                "loser_id": "loser_team_id",
-                "completed_at": "last_game_finished_at",
-            }
-        )
-        participants_legacy = participants_neutral.rename(
-            {
-                "event_id": "tournament_id",
-                "group_id": "team_id",
-                "entity_id": "user_id",
-            }
-        )
-
-        engine1 = LOOPREngine(now_ts=NOW)
-        r_neutral = engine1.rank_entities(
-            matches_neutral, participants_neutral
-        ).sort("entity_id")
-
-        engine2 = LOOPREngine(now_ts=NOW)
-        r_legacy = engine2.rank_players(
-            matches_legacy, participants_legacy
-        ).sort("id")
-
-        np.testing.assert_allclose(
-            r_neutral["score"].to_numpy(),
-            r_legacy["score"].to_numpy(),
-            atol=1e-10,
-        )
-
 
 # ── Scenario 12: Backend comparison ─────────────────────────────────────────
 

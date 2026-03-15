@@ -75,16 +75,14 @@ class TickTockEngine:
         self.tournament_influence: dict[int, float] = {}
 
     # ------------------------------------------------------------------ public
-    def rank_players(
+    def _rank_internal(
         self,
         matches: pl.DataFrame,
-        players: pl.DataFrame,
+        participants: pl.DataFrame,
         initial_influence: dict[int, float] | None = None,
     ) -> pl.DataFrame:
         start_time = time.time()
-        inputs = prepare_rank_inputs(matches, players)
-        matches = inputs.matches
-        players = inputs.participants
+        players = participants
 
         # Initial S
         if initial_influence:
@@ -188,8 +186,13 @@ class TickTockEngine:
         participants: pl.DataFrame,
         initial_influence: dict[int, float] | None = None,
     ) -> pl.DataFrame:
-        """Domain-agnostic wrapper returning `entity_id` rankings."""
-        result = self.rank_players(matches, participants, initial_influence)
+        """Validate neutral inputs and return `entity_id` rankings."""
+        inputs = prepare_rank_inputs(matches, participants)
+        result = self._rank_internal(
+            inputs.matches,
+            inputs.participants,
+            initial_influence,
+        )
         if result.is_empty():
             return result
         return result.rename({"player_id": "entity_id", "rating": "score"})

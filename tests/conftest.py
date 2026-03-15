@@ -2,40 +2,6 @@ import polars as pl
 import pytest
 
 
-def _legacy_tables_from_neutral(
-    matches: pl.DataFrame,
-    participants: pl.DataFrame,
-    appearances: pl.DataFrame | None = None,
-) -> dict[str, pl.DataFrame | None]:
-    legacy = {
-        "matches": matches.rename(
-            {
-                "event_id": "tournament_id",
-                "winner_id": "winner_team_id",
-                "loser_id": "loser_team_id",
-                "completed_at": "last_game_finished_at",
-            }
-        ),
-        "participants": participants.rename(
-            {
-                "event_id": "tournament_id",
-                "group_id": "team_id",
-                "entity_id": "user_id",
-            }
-        ),
-        "appearances": None,
-    }
-    if appearances is not None:
-        legacy["appearances"] = appearances.rename(
-            {
-                "event_id": "tournament_id",
-                "group_id": "team_id",
-                "entity_id": "user_id",
-            }
-        )
-    return legacy
-
-
 @pytest.fixture
 def single_match_neutral_tables():
     return {
@@ -85,8 +51,3 @@ def multi_event_neutral_tables():
         }
     )
     return {"matches": matches, "participants": participants, "appearances": None}
-
-
-@pytest.fixture
-def multi_event_legacy_tables(multi_event_neutral_tables):
-    return _legacy_tables_from_neutral(**multi_event_neutral_tables)

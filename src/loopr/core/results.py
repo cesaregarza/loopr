@@ -35,13 +35,13 @@ class RankResult:
 
     def to_dataframe(
         self,
-        id_column: str = "player_id",
+        id_column: str = "entity_id",
         score_column: str = "score",
     ) -> pl.DataFrame:
         """Convert results to a Polars DataFrame.
 
         Args:
-            id_column: Name for ID column. Defaults to "player_id".
+            id_column: Name for ID column. Defaults to "entity_id".
             score_column: Name for score column. Defaults to "score".
 
         Returns:
@@ -105,4 +105,3 @@ class ExposureLogOddsResult(RankResult):
     active_mask: np.ndarray | None = None
     raw_scores: np.ndarray | None = None
     decay_factors: np.ndarray | None = None
-

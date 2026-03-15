@@ -36,13 +36,13 @@ if TYPE_CHECKING:
 class ExposureLogOddsEngine:
     """Exposure Log-Odds rating engine using modular components.
 
-    Updated to mirror the legacy implementation semantics:
-      - Teleport ρ is exposure-based (sum of match pair 'share' per player)
+    Semantics:
+      - Teleport ρ is exposure-based (sum of match pair 'share' per entity)
       - Two PageRanks with the SAME ρ (col-stochastic)
       - Lambda auto-tuned to ~2.5% of median PR per node (dividing by median ρ)
-      - Reporting 'exposure' uses sum of 'weight' (legacy reporting semantics)
+      - Reporting 'exposure' uses the summed match-pair weight
       - Optional time-decay after inactivity delay
-      - Output schema: id + player_rank (legacy-compatible)
+      - Public output schema uses neutral entity identifiers
     """
 
     def __init__(
@@ -70,51 +70,44 @@ class ExposureLogOddsEngine:
         self._converted_matches_df: pl.DataFrame | None = None
         self.last_stage_timings: dict[str, float] | None = None
 
-    def rank_players(
+    def _rank_internal(
         self,
         matches: pl.DataFrame,
-        players: pl.DataFrame,
+        participants: pl.DataFrame,
         tournament_influence: dict[int, float] | None = None,
         *,
         appearances: pl.DataFrame | None = None,
     ) -> pl.DataFrame:
-        """Rank players using the Exposure Log-Odds algorithm.
+        """Rank prepared internal inputs using the Exposure Log-Odds algorithm.
 
         Args:
             matches: DataFrame containing match data.
-            players: DataFrame containing player data.
+            participants: DataFrame containing prepared participant data.
             tournament_influence: Optional mapping of tournament IDs to influence weights.
 
         Returns:
-            DataFrame containing player rankings.
+            DataFrame containing entity rankings.
         """
         start_time = time.perf_counter()
         stage_timings: dict[str, float] = {}
-        stage_start = start_time
-        inputs = prepare_rank_inputs(
-            matches,
-            players,
-            appearances,
-        )
-        matches = inputs.matches
-        players = inputs.participants
-        appearances = inputs.appearances
-        stage_timings["input_normalization"] = time.perf_counter() - stage_start
+        participants_df = participants
+        stage_timings["input_normalization"] = 0.0
 
-        # 1) Get active players and tournament influences via tick‑tock
-        #    Note: we will UNION these with players who actually appear in matches
-        #    (from appearances/rosters) to ensure subs are included.
+        # 1) Get active entities and tournament influences via tick-tock.
+        #    Union them with entities who actually appear in matches so subs are kept.
         stage_start = time.perf_counter()
         if self.config.use_tick_tock_active:
             self.logger.info(
-                "Running tick-tock to obtain active players & tournament influences..."
+                "Running tick-tock to obtain active entities & tournament influences..."
             )
-            tick = self._run_tick_tock_for_active_players(matches, players)
-            active_players = tick["active_players"]
+            tick = self._run_tick_tock_for_active_entities(
+                matches, participants_df
+            )
+            active_entities = tick["active_entities"]
             tournament_influence = tick["tournament_influence"]
         else:
             self.logger.info("Skipping tick-tock (use_tick_tock_active=False)")
-            active_players = players["user_id"].to_list()
+            active_entities = participants_df["user_id"].to_list()
             tournament_influence = tournament_influence or {}
         stage_timings["active_resolution"] = time.perf_counter() - stage_start
 
@@ -123,7 +116,7 @@ class ExposureLogOddsEngine:
         stage_start = time.perf_counter()
         prepared_matches = _prepare_exposure_matches_normalized(
             matches,
-            players,
+            participants_df,
             tournament_influence or {},
             self.clock.now,
             self.config.decay.decay_rate,
@@ -148,19 +141,18 @@ class ExposureLogOddsEngine:
             precomputed=prepared_matches.entity_metrics,
         )
 
-        # 3) Restrict nodes to active players, but always include those who actually
-        #    appeared in matches (subs, late adds). This unions the tick‑tock set
+        # 3) Restrict nodes to active entities, but always include those who
+        #    appeared in matches (subs, late adds). This unions the tick-tock set
         #    with the IDs present in winners/losers after conversion.
-        #    This ensures valid appearance-only players are not dropped.
         stage_start = time.perf_counter()
         node_ids = merged_node_ids(
             mdf,
-            active_players,
+            active_entities,
             aggregated_metrics=entity_metrics,
         )
         if not node_ids:
             self.logger.warning(
-                "No active or appeared players after union; returning empty result."
+                "No active or appeared entities after union; returning empty result."
             )
             stage_timings["node_setup"] = time.perf_counter() - stage_start
             stage_timings["total"] = time.perf_counter() - start_time
@@ -313,12 +305,13 @@ class ExposureLogOddsEngine:
         *,
         appearances: pl.DataFrame | None = None,
     ) -> pl.DataFrame:
-        """Domain-agnostic wrapper returning `entity_id` rankings."""
-        result = self.rank_players(
-            matches,
-            participants,
+        """Validate neutral inputs and return `entity_id` rankings."""
+        inputs = prepare_rank_inputs(matches, participants, appearances)
+        result = self._rank_internal(
+            inputs.matches,
+            inputs.participants,
             tournament_influence,
-            appearances=appearances,
+            appearances=inputs.appearances,
         )
         if result.is_empty():
             return result
@@ -333,7 +326,7 @@ class ExposureLogOddsEngine:
         """
         Prepare LOO analyzer with pre-factorized solvers for fast repeated analysis.
 
-        This should be called after rank_players() to set up the LOO infrastructure.
+        This should be called after rank_entities() to set up the LOO infrastructure.
         The analyzer is cached and reused unless force_rebuild is True.
 
         Args:
@@ -343,28 +336,27 @@ class ExposureLogOddsEngine:
         """
         if self.last_result is None:
             raise ValueError(
-                "Must call rank_players() before preparing LOO analyzer"
+                "Must call rank_entities() before preparing LOO analyzer"
             )
 
         # Use internal converted matches if not provided
         if matches_df is None:
             if self._converted_matches_df is None:
                 raise ValueError(
-                    "No converted matches available. Call rank_players() first."
+                    "No converted matches available. Call rank_entities() first."
                 )
             matches_df = self._converted_matches_df
             self.logger.info("Using internally converted matches dataframe")
 
-        # Use last result's player data if not provided
+        # Use last result's entity data if not provided
         if players_df is None:
-            # Create a simple players dataframe from last result
             players_df = pl.DataFrame(
                 {
-                    "player_id": self.last_result.ids,
-                    "name": [f"Player_{pid}" for pid in self.last_result.ids],
+                    "entity_id": self.last_result.ids,
+                    "name": [f"Entity_{entity_id}" for entity_id in self.last_result.ids],
                 }
             )
-            self.logger.info("Using player IDs from last ranking result")
+            self.logger.info("Using entity IDs from last ranking result")
 
         # Check if we need to rebuild
         if not force_rebuild and self._loo_analyzer is not None:
@@ -400,17 +392,17 @@ class ExposureLogOddsEngine:
         )
 
     def analyze_match_impact(
-        self, match_id: int, player_id: int, include_teleport: bool = True
+        self, match_id: int, entity_id: int, include_teleport: bool = True
     ) -> dict[str, Any]:
         """
-        Analyze the impact of removing a match on a player's score.
+        Analyze the impact of removing a match on an entity's score.
 
         Automatically prepares LOO analyzer if needed.
         Uses pre-factorized solvers for extremely fast analysis.
 
         Args:
             match_id: Match to analyze
-            player_id: Player to check impact for
+            entity_id: Entity to check impact for
             include_teleport: Whether to include teleport vector changes
 
         Returns:
@@ -421,26 +413,26 @@ class ExposureLogOddsEngine:
             self.logger.info("LOO analyzer not prepared, initializing now...")
             self.prepare_loo_analyzer()
 
-        return self._loo_analyzer.impact_of_match_on_player(
-            match_id, player_id, include_teleport
+        return self._loo_analyzer.impact_of_match_on_entity(
+            match_id, entity_id, include_teleport
         )
 
-    def analyze_player_matches(
+    def analyze_entity_matches(
         self,
-        player_id: int,
+        entity_id: int,
         limit: int | None = None,
         include_teleport: bool = True,
         parallel: bool = True,
         max_workers: int = 4,
     ) -> pl.DataFrame:
         """
-        Analyze impact of all matches involving a player.
+        Analyze impact of all matches involving an entity.
 
         Automatically prepares LOO analyzer if needed.
         Uses pre-factorized solvers and parallel processing for speed.
 
         Args:
-            player_id: Player to analyze
+            entity_id: Entity to analyze
             limit: Maximum number of matches to analyze
             include_teleport: Whether to include teleport changes
             parallel: Use parallel processing
@@ -454,8 +446,8 @@ class ExposureLogOddsEngine:
             self.logger.info("LOO analyzer not prepared, initializing now...")
             self.prepare_loo_analyzer()
 
-        return self._loo_analyzer.analyze_player_matches(
-            player_id,
+        return self._loo_analyzer.analyze_entity_matches(
+            entity_id,
             limit,
             include_teleport,
             use_flux_ranking=True,
@@ -475,10 +467,10 @@ class ExposureLogOddsEngine:
     # ---------------------------------------------------------------------
     # internals
     # ---------------------------------------------------------------------
-    def _run_tick_tock_for_active_players(
+    def _run_tick_tock_for_active_entities(
         self,
         matches: pl.DataFrame,
-        players: pl.DataFrame,
+        participants: pl.DataFrame,
     ) -> dict[str, Any]:
         from loopr.algorithms.tick_tock import TickTockEngine
 
@@ -490,17 +482,13 @@ class ExposureLogOddsEngine:
             except Exception:
                 pass
 
-        tt_df = engine.rank_players(matches, players)
-        active_players = (
-            tt_df["player_id"].to_list()
-            if "player_id" in tt_df.columns
-            else (tt_df["id"].to_list() if "id" in tt_df.columns else [])
-        )
+        tt_df = engine._rank_internal(matches, participants)
+        active_entities = tt_df["player_id"].to_list()
         tournament_influence_data = (
             getattr(engine, "tournament_influence", {}) or {}
         )
         return {
-            "active_players": active_players,
+            "active_entities": active_entities,
             "tournament_influence": tournament_influence_data,
         }
 

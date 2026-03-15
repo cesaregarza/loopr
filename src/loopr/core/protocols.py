@@ -22,7 +22,7 @@ class RatingBackend(Protocol):
     def compute(
         self,
         matches: pl.DataFrame,
-        players: pl.DataFrame | None,
+        participants: pl.DataFrame | None,
         active_ids: list[Any],
         tournament_influence: dict[int, float],
         **kwargs: Any,
@@ -31,13 +31,13 @@ class RatingBackend(Protocol):
 
         Args:
             matches: Match data.
-            players: Optional player/roster data.
-            active_ids: List of active player/team IDs.
+            participants: Optional participant/roster data.
+            active_ids: List of active entity or group IDs.
             tournament_influence: Current tournament influence scores.
             **kwargs: Additional backend-specific parameters.
 
         Returns:
-            DataFrame with columns: id (player/team identifier), score (rating score),
+            DataFrame with columns: id (entity/group identifier), score (rating score),
             quality_mass (bounded quality measure for influence update), and optionally
             win_pr, loss_pr, exposure, lambda_used.
         """

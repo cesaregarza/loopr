@@ -12,9 +12,8 @@ import polars as pl
 from loopr.core.edges import _prepare_weighted_matches
 from loopr.schema import (
     prepare_rank_inputs,
-    normalize_appearances_schema,
-    normalize_matches_schema,
-    normalize_participants_schema,
+    prepare_matches_frame,
+    prepare_participants_frame,
 )
 
 if TYPE_CHECKING:
@@ -356,7 +355,9 @@ def convert_matches_dataframe(
         also includes winner_count, loser_count, share.
     """
     prepared = prepare_rank_inputs(matches, players, appearances)
-    rosters = normalize_participants_schema(rosters)
+    rosters = (
+        prepare_participants_frame(rosters) if rosters is not None else None
+    )
     return _convert_matches_dataframe_normalized(
         prepared.matches,
         prepared.participants,
@@ -517,7 +518,7 @@ def convert_team_matches(
     Returns:
         List of match dictionaries with team IDs as single-element lists.
     """
-    matches = normalize_matches_schema(matches)
+    matches = prepare_matches_frame(matches)
     return _convert_team_matches_normalized(
         matches,
         tournament_influence,

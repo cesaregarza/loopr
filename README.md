@@ -100,22 +100,9 @@ If `appearances` are provided, the engines use them to determine who actually
 played in a match. If `group_id` is missing, `loopr` infers it from the
 participants table when possible.
 
-## Accepted Aliases
-
-The library also accepts several legacy or alternate names.
-
-| Canonical meaning | Accepted columns |
-| --- | --- |
-| event id | `event_id`, `tournament_id` |
-| winning group id | `winner_id`, `winner_group_id`, `winner_team_id` |
-| losing group id | `loser_id`, `loser_group_id`, `loser_team_id` |
-| entity id | `entity_id`, `participant_id`, `player_id`, `user_id` |
-| group id | `group_id`, `side_id`, `competitor_id`, `team_id` |
-| completed timestamp | `completed_at`, `event_ts`, `timestamp`, `ts`, `last_game_finished_at` |
-| created timestamp | `created_at`, `match_created_at` |
-| bye flag | `walkover`, `is_walkover`, `bye`, `is_bye` |
-
-New code should prefer the neutral `event` / `group` / `entity` naming.
+The public API is neutral-schema-only. Inputs that use the older
+`tournament` / `team` / `user` naming are no longer accepted by the supported
+surface.
 
 ## Engine Overview
 
@@ -128,7 +115,7 @@ Characteristics:
 - volume-neutral, exposure-based log-odds ranking
 - optional time decay
 - optional inactivity decay
-- optional tick-tock active-player filtering
+- optional tick-tock active-entity filtering
 - exact leave-one-match-out analysis support
 
 `rank_entities(...)` returns a Polars `DataFrame` sorted by rank with:
@@ -217,7 +204,7 @@ Important knobs for `LOOPREngine`:
 - `engine.min_exposure`: filter low-exposure entities from final output
 - `engine.score_decay_delay_days` / `engine.score_decay_rate`: inactivity decay after ranking
 - `lambda_mode` / `fixed_lambda`: score smoothing mode
-- `use_tick_tock_active`: whether to derive active players via tick-tock first
+- `use_tick_tock_active`: whether to derive active entities via tick-tock first
 
 ## Working With Appearances
 
@@ -233,19 +220,15 @@ rankings = engine.rank_entities(
 ```
 
 This matters because the log-odds engines distribute match exposure across the
-players that participated in the match, not just the full roster.
+entities that participated in the match, not just the full roster.
 
 ## Schema Utilities
 
-The package exports helpers for normalizing inputs before ranking:
+The package exports `prepare_rank_inputs(...)` to validate neutral inputs and
+rename them into the internal engine schema:
 
 ```python
-from loopr import (
-    normalize_appearances_schema,
-    normalize_matches_schema,
-    normalize_participants_schema,
-    prepare_rank_inputs,
-)
+from loopr import prepare_rank_inputs
 
 prepared = prepare_rank_inputs(matches, participants, appearances)
 ```
@@ -267,27 +250,27 @@ engine.rank_entities(matches, participants, appearances=appearances)
 
 engine.prepare_loo_analyzer()
 
-impact = engine.analyze_match_impact(match_id=10, player_id=1)
+impact = engine.analyze_match_impact(match_id=10, entity_id=1)
 print(impact["delta"]["score"])
 
-player_impacts = engine.analyze_player_matches(
-    player_id=1,
+entity_impacts = engine.analyze_entity_matches(
+    entity_id=1,
     limit=20,
     include_teleport=True,
     parallel=True,
     max_workers=4,
 )
-print(player_impacts.head())
+print(entity_impacts.head())
 ```
 
 Useful methods:
 
 - `prepare_loo_analyzer(...)`
-- `analyze_match_impact(match_id, player_id, include_teleport=True)`
-- `analyze_player_matches(player_id, limit=None, include_teleport=True, parallel=True, max_workers=4)`
+- `analyze_match_impact(match_id, entity_id, include_teleport=True)`
+- `analyze_entity_matches(entity_id, limit=None, include_teleport=True, parallel=True, max_workers=4)`
 - `get_loo_analyzer()`
 
-`analyze_player_matches(...)` returns a `DataFrame` sorted by absolute impact
+`analyze_entity_matches(...)` returns a `DataFrame` sorted by absolute impact
 with columns:
 
 - `match_id`

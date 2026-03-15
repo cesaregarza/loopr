@@ -87,7 +87,7 @@ class TestRankResult:
             ids=[1, 2, 3],
         )
         df = result.to_dataframe()
-        assert "player_id" in df.columns
+        assert "entity_id" in df.columns
         assert "score" in df.columns
         assert df.height == 3
 
@@ -122,7 +122,7 @@ class TestRankResult:
         )
         top = result.get_top_n(3)
         assert top.height == 3
-        assert top["player_id"][0] == 4  # highest score
+        assert top["entity_id"][0] == 4  # highest score
 
 
 class TestTickTockResult:

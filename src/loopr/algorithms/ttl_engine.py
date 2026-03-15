@@ -77,27 +77,25 @@ class TTLEngine:
         # Damping factor for stability
         self.damping_mu = 0.5  # Can be configured
 
-    def rank_players(
+    def _rank_internal(
         self,
         matches: pl.DataFrame,
-        players: pl.DataFrame,
+        participants: pl.DataFrame,
         initial_influence: Optional[dict[int, float]] = None,
     ) -> pl.DataFrame:
         """
-        Rank players using TTL algorithm.
+        Rank prepared entities using the TTL algorithm.
 
         Args:
-            matches: Match data
-            players: Player/roster data
-            initial_influence: Optional initial tournament influences
+            matches: Prepared match data.
+            participants: Prepared participant/roster data.
+            initial_influence: Optional initial tournament influences.
 
         Returns:
-            DataFrame with player rankings
+            DataFrame with internal ranking columns.
         """
         start_time = time.time()
-        inputs = prepare_rank_inputs(matches, players)
-        matches = inputs.matches
-        players = inputs.participants
+        players = participants
 
         # Initialize tournament influence
         if initial_influence:
@@ -291,7 +289,7 @@ class TTLEngine:
             if col in rating_result.columns:
                 result_df = result_df.with_columns(rating_result[col])
 
-        # Filter inactive players
+        # Filter inactive entities
         result_df = result_df.filter(pl.col("active"))
 
         elapsed = time.time() - start_time
@@ -305,8 +303,13 @@ class TTLEngine:
         participants: pl.DataFrame,
         initial_influence: Optional[dict[int, float]] = None,
     ) -> pl.DataFrame:
-        """Domain-agnostic wrapper returning `entity_id` rankings."""
-        result = self.rank_players(matches, participants, initial_influence)
+        """Validate neutral inputs and return `entity_id` rankings."""
+        inputs = prepare_rank_inputs(matches, participants)
+        result = self._rank_internal(
+            inputs.matches,
+            inputs.participants,
+            initial_influence,
+        )
         if result.is_empty():
             return result
         return result.rename({"player_id": "entity_id"})
