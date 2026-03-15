@@ -34,6 +34,16 @@ def pagerank_sparse(
     adjacency_matrix = sp.csr_matrix(
         (weights, (rows, cols)), shape=(num_nodes, num_nodes)
     )
+    return pagerank_from_adjacency(adjacency_matrix, teleport, cfg)
+
+
+def pagerank_from_adjacency(
+    adjacency_matrix: sp.spmatrix,
+    teleport: np.ndarray,
+    cfg: PageRankConfig,
+) -> np.ndarray:
+    """Generic PageRank on a pre-built sparse adjacency matrix."""
+    adjacency_matrix = adjacency_matrix.tocsr()
 
     sums = np.asarray(
         adjacency_matrix.sum(axis=1 if cfg.orientation == "row" else 0)

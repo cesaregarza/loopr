@@ -260,17 +260,20 @@ def build_exposure_triplets(
     node_to_index: dict[Any, int] | None = None,
     *,
     index_mapping: pl.DataFrame | None = None,
+    pair_edges: pl.DataFrame | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Produce COO triplets (row=winner_idx, col=loser_idx, data=share).
 
-    Uses list-explode to form the cartesian product winner×loser per match,
-    then maps IDs to indices via dict lookup (avoids Polars join overhead).
+    Uses pre-aggregated pair edges when available, otherwise expands match lists
+    once and aggregates duplicates before mapping IDs to indices.
 
     Args:
         matches_dataframe: DataFrame with winners, losers, share columns.
         node_to_index: Mapping from node IDs to indices.
         index_mapping: Polars DataFrame lookup (used only to extract dict if
             node_to_index is not provided).
+        pair_edges: Optional pre-aggregated exposure edges with columns
+            [winner_id, loser_id, share].
 
     Returns:
         Tuple of (row_indices, col_indices, weights).
@@ -297,17 +300,33 @@ def build_exposure_triplets(
                 np.array([], dtype=np.float64),
             )
 
-    # Explode both lists to pairs — single Polars operation
-    pairs = (
-        matches_dataframe.explode("winners")
-        .explode("losers")
-        .select(["winners", "losers", "share"])
-    )
+    if pair_edges is None:
+        if matches_dataframe.is_empty():
+            return (
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.float64),
+            )
+        pair_edges = (
+            matches_dataframe.select(["winners", "losers", "share"])
+            .explode("winners")
+            .drop_nulls("winners")
+            .explode("losers")
+            .drop_nulls("losers")
+            .group_by(["winners", "losers"])
+            .agg(pl.col("share").sum().alias("share"))
+            .rename({"winners": "winner_id", "losers": "loser_id"})
+        )
+    elif pair_edges.is_empty():
+        return (
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.float64),
+        )
 
-    # Extract raw arrays and map IDs via dict (avoid two Polars joins)
-    winner_ids = pairs["winners"].to_list()
-    loser_ids = pairs["losers"].to_list()
-    shares = pairs["share"].to_numpy()
+    winner_ids = pair_edges["winner_id"].to_list()
+    loser_ids = pair_edges["loser_id"].to_list()
+    shares = pair_edges["share"].to_numpy()
 
     # Vectorized dict lookup with filtering
     n = len(winner_ids)
@@ -335,15 +354,7 @@ def build_exposure_triplets(
     rows = row_buf[:count]
     cols = col_buf[:count]
     wts = wt_buf[:count]
-
-    # Aggregate duplicate (row, col) pairs using scipy sparse
-    from scipy.sparse import coo_matrix
-
-    n_nodes = max(node_to_index.values()) + 1
-    coo = coo_matrix((wts, (rows, cols)), shape=(n_nodes, n_nodes))
-    coo.sum_duplicates()
-
-    return coo.row.astype(np.int64), coo.col.astype(np.int64), coo.data
+    return rows, cols, wts
 
 
 def compute_denominators(

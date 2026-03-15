@@ -12,3 +12,8 @@ def test_loopr_engine_ranks_entities_with_neutral_schema(multi_event_neutral_tab
     assert rankings.height > 0
     assert "player_rank" in rankings.columns
     assert rankings["player_rank"].is_sorted(descending=True)
+    assert engine.last_result is not None
+    assert engine.last_result.stage_timings is not None
+    assert engine.last_result.stage_timings["total"] > 0.0
+    assert engine.last_result.teleport is not None
+    assert abs(engine.last_result.teleport.sum() - 1.0) < 1e-10

@@ -20,8 +20,15 @@ def build_index_mapping(node_to_idx: dict[int, int]) -> pl.DataFrame:
     return pl.DataFrame({"id": list(entity_ids), "idx": list(indices)})
 
 
-def aggregate_entity_metrics(matches_df: pl.DataFrame) -> pl.DataFrame:
+def aggregate_entity_metrics(
+    matches_df: pl.DataFrame,
+    *,
+    precomputed: pl.DataFrame | None = None,
+) -> pl.DataFrame:
     """Aggregate per-entity share, weight, and last activity once."""
+    if precomputed is not None:
+        return precomputed
+
     if matches_df.is_empty():
         return pl.DataFrame(
             schema={
@@ -188,13 +195,12 @@ def _metric_vector(
         .group_by("id")
         .agg(pl.col(value_column).sum().alias(output_column))
     )
-
-    vector = np.zeros(len(node_to_idx), dtype=float)
-    for row in aggregated.iter_rows(named=True):
-        idx = node_to_idx.get(row["id"])
-        if idx is not None:
-            vector[idx] = float(row[output_column])
-    return vector
+    return _metric_vector_from_aggregated(
+        aggregated,
+        node_to_idx,
+        output_column,
+        len(node_to_idx),
+    )
 
 
 def teleport_from_share(

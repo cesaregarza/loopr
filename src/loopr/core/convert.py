@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -18,6 +19,304 @@ from loopr.schema import (
 
 if TYPE_CHECKING:
     from typing import Any
+
+
+@dataclass(frozen=True)
+class PreparedExposureMatches:
+    """Reusable intermediate tables for exposure-based ranking."""
+
+    matches: pl.DataFrame
+    pair_edges: pl.DataFrame
+    entity_metrics: pl.DataFrame
+
+
+def _empty_pair_edges() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "winner_id": pl.Int64,
+            "loser_id": pl.Int64,
+            "share": pl.Float64,
+        }
+    )
+
+
+def _empty_entity_metrics() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "id": pl.Int64,
+            "share": pl.Float64,
+            "weight": pl.Float64,
+            "ts": pl.Float64,
+        }
+    )
+
+
+def _prepare_weighted_match_frame(
+    matches: pl.DataFrame,
+    tournament_influence: dict[int, float],
+    now_timestamp: float,
+    decay_rate: float,
+    beta: float,
+) -> pl.DataFrame:
+    needed_columns = [
+        "match_id",
+        "tournament_id",
+        "winner_team_id",
+        "loser_team_id",
+    ]
+
+    for column_name in ["last_game_finished_at", "match_created_at"]:
+        if column_name in matches.columns:
+            needed_columns.append(column_name)
+
+    if "is_bye" in matches.columns:
+        needed_columns.append("is_bye")
+
+    match_data = matches.select(
+        [column_name for column_name in needed_columns if column_name in matches.columns]
+    )
+    match_data = _prepare_weighted_matches(
+        match_data,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+    )
+    return match_data.rename({"match_weight": "weight"})
+
+
+def _group_team_members(
+    players: pl.DataFrame,
+) -> pl.DataFrame:
+    if players.is_empty():
+        return pl.DataFrame(
+            schema={
+                "tournament_id": pl.Int64,
+                "team_id": pl.Int64,
+                "user_id": pl.List(pl.Int64),
+            }
+        )
+    return (
+        players.select(["tournament_id", "team_id", "user_id"])
+        .group_by(["tournament_id", "team_id"])
+        .agg(pl.col("user_id"))
+    )
+
+
+def _group_match_appearances(
+    appearances: pl.DataFrame | None,
+    players: pl.DataFrame,
+) -> pl.DataFrame | None:
+    if appearances is None or appearances.is_empty():
+        return None
+
+    appearance_rows = appearances
+    if "team_id" not in appearance_rows.columns:
+        team_lookup = players.select(
+            ["tournament_id", "user_id", "team_id"]
+        ).unique(subset=["tournament_id", "user_id"], keep="any")
+        appearance_rows = appearance_rows.join(
+            team_lookup,
+            on=["tournament_id", "user_id"],
+            how="left",
+        )
+
+    appearance_rows = appearance_rows.drop_nulls("team_id")
+    if appearance_rows.is_empty():
+        return None
+
+    return (
+        appearance_rows.select(
+            ["tournament_id", "match_id", "team_id", "user_id"]
+        )
+        .group_by(["tournament_id", "match_id", "team_id"])
+        .agg(pl.col("user_id"))
+    )
+
+
+def _assign_match_rosters(
+    match_data: pl.DataFrame,
+    roster_source: pl.DataFrame,
+    appearance_source: pl.DataFrame | None,
+) -> pl.DataFrame:
+    winner_rosters = roster_source.rename(
+        {"team_id": "winner_team_id", "user_id": "winner_roster"}
+    )
+    loser_rosters = roster_source.rename(
+        {"team_id": "loser_team_id", "user_id": "loser_roster"}
+    )
+
+    match_data = match_data.join(
+        winner_rosters,
+        on=["tournament_id", "winner_team_id"],
+        how="left",
+    ).join(
+        loser_rosters,
+        on=["tournament_id", "loser_team_id"],
+        how="left",
+    )
+
+    if appearance_source is not None:
+        winner_appearances = appearance_source.rename(
+            {"team_id": "winner_team_id", "user_id": "winner_appearance"}
+        )
+        loser_appearances = appearance_source.rename(
+            {"team_id": "loser_team_id", "user_id": "loser_appearance"}
+        )
+        match_data = match_data.join(
+            winner_appearances,
+            on=["tournament_id", "match_id", "winner_team_id"],
+            how="left",
+        ).join(
+            loser_appearances,
+            on=["tournament_id", "match_id", "loser_team_id"],
+            how="left",
+        )
+
+        winners_expr = (
+            pl.when(pl.col("winner_appearance").is_not_null())
+            .then(pl.col("winner_appearance"))
+            .otherwise(pl.col("winner_roster"))
+            .alias("winners")
+        )
+        losers_expr = (
+            pl.when(pl.col("loser_appearance").is_not_null())
+            .then(pl.col("loser_appearance"))
+            .otherwise(pl.col("loser_roster"))
+            .alias("losers")
+        )
+    else:
+        winners_expr = pl.col("winner_roster").alias("winners")
+        losers_expr = pl.col("loser_roster").alias("losers")
+
+    return (
+        match_data.with_columns([winners_expr, losers_expr])
+        .filter(
+            pl.col("winners").is_not_null()
+            & pl.col("losers").is_not_null()
+            & (pl.col("winners").list.len() > 0)
+            & (pl.col("losers").list.len() > 0)
+        )
+    )
+
+
+def _aggregate_entity_metrics_from_matches(
+    match_data: pl.DataFrame,
+) -> pl.DataFrame:
+    if match_data.is_empty():
+        return _empty_entity_metrics()
+
+    pieces = []
+    value_columns = [
+        column for column in ("share", "weight", "ts") if column in match_data.columns
+    ]
+
+    for entity_column in ("winners", "losers"):
+        pieces.append(
+            match_data.select([pl.col(entity_column).alias("id"), *value_columns])
+            .explode("id")
+            .drop_nulls("id")
+        )
+
+    aggregations = []
+    if "share" in value_columns:
+        aggregations.append(pl.col("share").sum().alias("share"))
+    if "weight" in value_columns:
+        aggregations.append(pl.col("weight").sum().alias("weight"))
+    if "ts" in value_columns:
+        aggregations.append(pl.col("ts").max().alias("ts"))
+
+    return pl.concat(pieces).group_by("id").agg(aggregations)
+
+
+def _build_exposure_pair_edges(
+    match_data: pl.DataFrame,
+) -> pl.DataFrame:
+    if match_data.is_empty() or "share" not in match_data.columns:
+        return _empty_pair_edges()
+
+    return (
+        match_data.select(["winners", "losers", "share"])
+        .explode("winners")
+        .drop_nulls("winners")
+        .explode("losers")
+        .drop_nulls("losers")
+        .group_by(["winners", "losers"])
+        .agg(pl.col("share").sum().alias("share"))
+        .rename({"winners": "winner_id", "losers": "loser_id"})
+    )
+
+
+def _prepare_exposure_matches_normalized(
+    matches: pl.DataFrame,
+    players: pl.DataFrame,
+    tournament_influence: dict[int, float],
+    now_timestamp: float,
+    decay_rate: float,
+    beta: float = 0.0,
+    *,
+    rosters: pl.DataFrame | None = None,
+    appearances: pl.DataFrame | None = None,
+    include_share: bool = True,
+    streaming: bool = False,
+) -> PreparedExposureMatches:
+    """Build compact match rows plus reusable exposure intermediates."""
+    del streaming  # retained for API compatibility
+
+    match_data = _prepare_weighted_match_frame(
+        matches,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+    )
+
+    roster_source = _group_team_members(rosters if rosters is not None else players)
+    appearance_source = _group_match_appearances(appearances, players)
+    match_data = _assign_match_rosters(
+        match_data,
+        roster_source,
+        appearance_source,
+    )
+
+    if include_share:
+        match_data = match_data.with_columns(
+            [
+                pl.col("winners").list.len().alias("winner_count"),
+                pl.col("losers").list.len().alias("loser_count"),
+            ]
+        ).with_columns(
+            (
+                pl.col("weight")
+                / (pl.col("winner_count") * pl.col("loser_count"))
+            ).alias("share")
+        )
+
+    final_columns = [
+        "match_id",
+        "tournament_id",
+        "winners",
+        "losers",
+        "weight",
+        "ts",
+    ]
+    if include_share:
+        final_columns.extend(["winner_count", "loser_count", "share"])
+
+    compact_matches = match_data.select(final_columns)
+
+    if not include_share:
+        return PreparedExposureMatches(
+            matches=compact_matches,
+            pair_edges=_empty_pair_edges(),
+            entity_metrics=_aggregate_entity_metrics_from_matches(compact_matches),
+        )
+
+    return PreparedExposureMatches(
+        matches=compact_matches,
+        pair_edges=_build_exposure_pair_edges(compact_matches),
+        entity_metrics=_aggregate_entity_metrics_from_matches(compact_matches),
+    )
 
 
 def convert_matches_dataframe(
@@ -86,143 +385,19 @@ def _convert_matches_dataframe_normalized(
     streaming: bool = False,
 ) -> pl.DataFrame:
     """Internal conversion path that assumes all inputs are already normalized."""
-
-    needed_columns = [
-        "match_id",
-        "tournament_id",
-        "winner_team_id",
-        "loser_team_id",
-    ]
-
-    for column_name in ["last_game_finished_at", "match_created_at"]:
-        if column_name in matches.columns:
-            needed_columns.append(column_name)
-
-    if "is_bye" in matches.columns:
-        needed_columns.append("is_bye")
-
-    match_data = matches.select(
-        [c for c in needed_columns if c in matches.columns]
+    prepared = _prepare_exposure_matches_normalized(
+        matches,
+        players,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+        rosters=rosters,
+        appearances=appearances,
+        include_share=include_share,
+        streaming=streaming,
     )
-
-    match_data = _prepare_weighted_matches(
-        match_data, tournament_influence, now_timestamp, decay_rate, beta,
-    )
-
-    match_data = match_data.rename({"match_weight": "weight"})
-
-    # Build roster lookup: (tournament_id, team_id) → list[user_id]
-    roster_lookup: dict[tuple[int, int], list] = {}
-    if rosters is not None:
-        for row in rosters.select(
-            ["tournament_id", "team_id", "user_id"]
-        ).iter_rows():
-            roster_lookup.setdefault((int(row[0]), int(row[1])), []).append(row[2])
-    else:
-        for row in players.select(
-            ["tournament_id", "team_id", "user_id"]
-        ).iter_rows():
-            roster_lookup.setdefault((int(row[0]), int(row[1])), []).append(row[2])
-
-    winners_col = "winners"
-    losers_col = "losers"
-
-    if appearances is not None and not appearances.is_empty():
-        # Build appearance lookup: (tournament_id, match_id, team_id) → list[user_id]
-        # First resolve team_id if missing
-        has_team_id = "team_id" in appearances.columns
-        if has_team_id:
-            app_rows = appearances.select(
-                ["tournament_id", "match_id", "team_id", "user_id"]
-            ).iter_rows()
-        else:
-            # Build user→team lookup from rosters for team derivation
-            user_team_lookup: dict[tuple[int, int], int] = {}
-            for row in players.select(
-                ["tournament_id", "user_id", "team_id"]
-            ).iter_rows():
-                user_team_lookup[(int(row[0]), row[1])] = int(row[2])
-
-            def _app_with_team():
-                for row in appearances.select(
-                    ["tournament_id", "match_id", "user_id"]
-                ).iter_rows():
-                    tid = int(row[0])
-                    team = user_team_lookup.get((tid, row[2]))
-                    if team is not None:
-                        yield (tid, int(row[1]), team, row[2])
-
-            app_rows = _app_with_team()
-
-        appearance_lookup: dict[tuple[int, int, int], list] = {}
-        for row in app_rows:
-            key = (int(row[0]), int(row[1]), int(row[2]))
-            appearance_lookup.setdefault(key, []).append(row[3])
-
-        # Assign winners/losers using appearances with roster fallback
-        winner_lists, loser_lists = [], []
-        for row in match_data.select(
-            ["tournament_id", "match_id", "winner_team_id", "loser_team_id"]
-        ).iter_rows():
-            tid, mid, wtid, ltid = int(row[0]), int(row[1]), int(row[2]), int(row[3])
-            w_played = appearance_lookup.get((tid, mid, wtid))
-            l_played = appearance_lookup.get((tid, mid, ltid))
-            winner_lists.append(w_played or roster_lookup.get((tid, wtid)))
-            loser_lists.append(l_played or roster_lookup.get((tid, ltid)))
-
-        match_data = match_data.with_columns(
-            [
-                pl.Series(winners_col, winner_lists),
-                pl.Series(losers_col, loser_lists),
-            ]
-        )
-    else:
-        # No appearances — use dict-based roster lookup (avoids 2 Polars joins)
-        winner_lists, loser_lists = [], []
-        for row in match_data.select(
-            ["tournament_id", "winner_team_id", "loser_team_id"]
-        ).iter_rows():
-            tid, wtid, ltid = int(row[0]), int(row[1]), int(row[2])
-            winner_lists.append(roster_lookup.get((tid, wtid)))
-            loser_lists.append(roster_lookup.get((tid, ltid)))
-
-        match_data = match_data.with_columns(
-            [
-                pl.Series(winners_col, winner_lists),
-                pl.Series(losers_col, loser_lists),
-            ]
-        )
-
-    match_data = match_data.filter(
-        pl.col(winners_col).is_not_null() & pl.col(losers_col).is_not_null()
-    )
-
-    if include_share:
-        match_data = match_data.with_columns(
-            [
-                pl.col(winners_col).list.len().alias("winner_count"),
-                pl.col(losers_col).list.len().alias("loser_count"),
-            ]
-        )
-        match_data = match_data.with_columns(
-            (
-                pl.col("weight")
-                / (pl.col("winner_count") * pl.col("loser_count"))
-            ).alias("share")
-        )
-
-    final_columns = [
-        "match_id",
-        "tournament_id",
-        winners_col,
-        losers_col,
-        "weight",
-        "ts",
-    ]
-    if include_share:
-        final_columns.extend(["winner_count", "loser_count", "share"])
-
-    return match_data.select(final_columns)
+    return prepared.matches
 
 
 def convert_matches_format(

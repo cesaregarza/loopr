@@ -28,7 +28,11 @@ from loopr.core.influence import (
     compute_tournament_influence,
     normalize_influence,
 )
-from loopr.core.pagerank import pagerank_dense, pagerank_sparse
+from loopr.core.pagerank import (
+    pagerank_dense,
+    pagerank_from_adjacency,
+    pagerank_sparse,
+)
 from loopr.core.protocols import RatingBackend
 from loopr.core.results import (
     ExposureLogOddsResult,
@@ -110,6 +114,7 @@ __all__ = [
     "normalize_edges",
     "normalize_influence",
     "pagerank_dense",
+    "pagerank_from_adjacency",
     "pagerank_sparse",
     "uniform",
     "volume_inverse",

@@ -213,6 +213,23 @@ class TestBuildExposureTriplets:
         rows, cols, weights = build_exposure_triplets(mdf, {})
         assert len(rows) == 0
 
+    def test_duplicate_pairs_are_aggregated(self):
+        mdf = pl.DataFrame(
+            {
+                "winners": [[1], [1]],
+                "losers": [[2], [2]],
+                "share": [0.2, 0.3],
+            }
+        )
+        rows, cols, weights = build_exposure_triplets(
+            mdf,
+            {1: 0, 2: 1},
+        )
+        assert len(rows) == 1
+        np.testing.assert_array_equal(rows, [0])
+        np.testing.assert_array_equal(cols, [1])
+        np.testing.assert_allclose(weights, [0.5])
+
 
 class TestEdgesToTriplets:
     def test_basic_conversion(self):

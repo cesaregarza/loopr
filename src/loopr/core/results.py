@@ -31,6 +31,7 @@ class RankResult:
 
     convergence_history: list[float] | None = None
     computation_time: float | None = None
+    stage_timings: dict[str, float] | None = None
 
     def to_dataframe(
         self,
@@ -104,5 +105,4 @@ class ExposureLogOddsResult(RankResult):
     active_mask: np.ndarray | None = None
     raw_scores: np.ndarray | None = None
     decay_factors: np.ndarray | None = None
-
 

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import polars as pl
+import scipy.sparse as sp
 
 from loopr.algorithms._log_odds_common import (
     aggregate_entity_metrics,
@@ -22,9 +23,9 @@ from loopr.core import (
     PageRankConfig,
     apply_inactivity_decay,
     build_exposure_triplets,
-    pagerank_sparse,
+    pagerank_from_adjacency,
 )
-from loopr.core.convert import _convert_matches_dataframe_normalized
+from loopr.core.convert import _prepare_exposure_matches_normalized
 from loopr.core.logging import get_logger
 from loopr.schema import prepare_rank_inputs
 
@@ -67,6 +68,7 @@ class ExposureLogOddsEngine:
         self._loo_matches_df: pl.DataFrame | None = None
         self._loo_players_df: pl.DataFrame | None = None
         self._converted_matches_df: pl.DataFrame | None = None
+        self.last_stage_timings: dict[str, float] | None = None
 
     def rank_players(
         self,
@@ -86,7 +88,9 @@ class ExposureLogOddsEngine:
         Returns:
             DataFrame containing player rankings.
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
+        stage_timings: dict[str, float] = {}
+        stage_start = start_time
         inputs = prepare_rank_inputs(
             matches,
             players,
@@ -95,10 +99,12 @@ class ExposureLogOddsEngine:
         matches = inputs.matches
         players = inputs.participants
         appearances = inputs.appearances
+        stage_timings["input_normalization"] = time.perf_counter() - stage_start
 
         # 1) Get active players and tournament influences via tick‑tock
         #    Note: we will UNION these with players who actually appear in matches
         #    (from appearances/rosters) to ensure subs are included.
+        stage_start = time.perf_counter()
         if self.config.use_tick_tock_active:
             self.logger.info(
                 "Running tick-tock to obtain active players & tournament influences..."
@@ -110,10 +116,12 @@ class ExposureLogOddsEngine:
             self.logger.info("Skipping tick-tock (use_tick_tock_active=False)")
             active_players = players["user_id"].to_list()
             tournament_influence = tournament_influence or {}
+        stage_timings["active_resolution"] = time.perf_counter() - stage_start
 
         # 2) Convert matches into compact per-match lists with roster expansion and weights
         self.logger.info("Converting matches...")
-        mdf = _convert_matches_dataframe_normalized(
+        stage_start = time.perf_counter()
+        prepared_matches = _prepare_exposure_matches_normalized(
             matches,
             players,
             tournament_influence or {},
@@ -124,19 +132,27 @@ class ExposureLogOddsEngine:
             include_share=True,
             streaming=False,
         )
+        mdf = prepared_matches.matches
         self._converted_matches_df = mdf
+        stage_timings["match_preparation"] = time.perf_counter() - stage_start
         if mdf.is_empty():
             self.logger.warning(
                 "No valid matches after conversion; returning empty result."
             )
+            stage_timings["total"] = time.perf_counter() - start_time
+            self.last_stage_timings = stage_timings
             return pl.DataFrame()
 
-        entity_metrics = aggregate_entity_metrics(mdf)
+        entity_metrics = aggregate_entity_metrics(
+            mdf,
+            precomputed=prepared_matches.entity_metrics,
+        )
 
         # 3) Restrict nodes to active players, but always include those who actually
         #    appeared in matches (subs, late adds). This unions the tick‑tock set
         #    with the IDs present in winners/losers after conversion.
         #    This ensures valid appearance-only players are not dropped.
+        stage_start = time.perf_counter()
         node_ids = merged_node_ids(
             mdf,
             active_players,
@@ -146,6 +162,9 @@ class ExposureLogOddsEngine:
             self.logger.warning(
                 "No active or appeared players after union; returning empty result."
             )
+            stage_timings["node_setup"] = time.perf_counter() - stage_start
+            stage_timings["total"] = time.perf_counter() - start_time
+            self.last_stage_timings = stage_timings
             return pl.DataFrame()
         node_to_idx = {pid: idx for idx, pid in enumerate(node_ids)}
         num_nodes = len(node_ids)
@@ -159,12 +178,19 @@ class ExposureLogOddsEngine:
             index_mapping=index_mapping,
         )
         self._last_rho = rho
+        stage_timings["node_setup"] = time.perf_counter() - stage_start
 
         # 5) Triplets for A_win (loser -> winner), then mirror for A_loss
+        stage_start = time.perf_counter()
         rows, cols, data = build_exposure_triplets(
             mdf,
             index_mapping=index_mapping,
+            pair_edges=prepared_matches.pair_edges,
         )
+        adjacency_win = sp.csr_matrix(
+            (data, (rows, cols)), shape=(num_nodes, num_nodes)
+        )
+        stage_timings["graph_build"] = time.perf_counter() - stage_start
 
         pr_cfg = PageRankConfig(
             alpha=self.config.pagerank.alpha,
@@ -175,14 +201,19 @@ class ExposureLogOddsEngine:
         )
 
         # 6) Win & loss PageRanks with SAME ρ
+        stage_start = time.perf_counter()
         self.logger.info("Computing win PageRank...")
-        win_pagerank = pagerank_sparse(rows, cols, data, num_nodes, rho, pr_cfg)
+        win_pagerank = pagerank_from_adjacency(adjacency_win, rho, pr_cfg)
         self.logger.info("Computing loss PageRank...")
-        loss_pagerank = pagerank_sparse(
-            cols, rows, data, num_nodes, rho, pr_cfg
+        loss_pagerank = pagerank_from_adjacency(
+            adjacency_win.transpose().tocsr(),
+            rho,
+            pr_cfg,
         )
+        stage_timings["pagerank"] = time.perf_counter() - stage_start
 
         # 7) Lambda smoothing
+        stage_start = time.perf_counter()
         lambda_smooth = resolve_lambda(
             win_pagerank,
             rho,
@@ -223,6 +254,7 @@ class ExposureLogOddsEngine:
             aggregated_metrics=entity_metrics,
             index_mapping=index_mapping,
         )
+        stage_timings["score_postprocess"] = time.perf_counter() - stage_start
 
         # 11) Apply minimum exposure filter if configured
         mask = np.ones(num_nodes, dtype=bool)
@@ -230,6 +262,7 @@ class ExposureLogOddsEngine:
             mask = exposure >= float(self.config.engine.min_exposure)
 
         # 12) Build result dataframe
+        stage_start = time.perf_counter()
         result = (
             pl.DataFrame(
                 {
@@ -244,23 +277,29 @@ class ExposureLogOddsEngine:
             .filter(pl.Series("active", mask))
             .sort("player_rank", descending=True)
         )
+        stage_timings["result_assembly"] = time.perf_counter() - stage_start
 
         # 13) Store diagnostics for downstream analysis
+        elapsed = time.perf_counter() - start_time
+        stage_timings["total"] = elapsed
+        self.last_stage_timings = stage_timings
         self.last_result = ExposureLogOddsResult(
             scores=scores,
             ids=node_ids,
             win_pagerank=win_pagerank,
             loss_pagerank=loss_pagerank,
-            exposure=rho,
+            teleport=rho,
+            exposure=exposure,
             lambda_used=lambda_smooth,
             active_mask=mask,
             raw_scores=scores.copy(),
+            computation_time=elapsed,
+            stage_timings=stage_timings.copy(),
         )
 
         # Store tournament influence for analysis tools
         self.tournament_influence = tournament_influence
 
-        elapsed = time.time() - start_time
         self.logger.info(
             "Exposure Log-Odds ranking completed in %.2fs", elapsed
         )

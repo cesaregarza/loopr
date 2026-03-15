@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import scipy.sparse as sp
 
 from loopr.algorithms._log_odds_common import (
     aggregate_entity_metrics,
@@ -17,9 +18,9 @@ from loopr.core import (
     Clock,
     PageRankConfig,
     build_exposure_triplets,
-    pagerank_sparse,
+    pagerank_from_adjacency,
 )
-from loopr.core.convert import _convert_matches_dataframe_normalized
+from loopr.core.convert import _prepare_exposure_matches_normalized
 from loopr.core.logging import get_logger
 from loopr.schema import prepare_rank_inputs
 
@@ -111,7 +112,7 @@ class LogOddsBackend:
         **kwargs,
     ) -> pl.DataFrame:
         """Compute ratings from already-normalized match and player frames."""
-        matches_df = _convert_matches_dataframe_normalized(
+        prepared_matches = _prepare_exposure_matches_normalized(
             matches,
             players,
             tournament_influence or {},
@@ -121,11 +122,15 @@ class LogOddsBackend:
             include_share=True,
             streaming=False,
         )
+        matches_df = prepared_matches.matches
         if matches_df.is_empty():
             self.logger.warning("No valid matches after conversion")
             return pl.DataFrame()
 
-        entity_metrics = aggregate_entity_metrics(matches_df)
+        entity_metrics = aggregate_entity_metrics(
+            matches_df,
+            precomputed=prepared_matches.entity_metrics,
+        )
         node_ids = merged_node_ids(
             matches_df,
             aggregated_metrics=entity_metrics,
@@ -146,6 +151,10 @@ class LogOddsBackend:
         rows, cols, data = build_exposure_triplets(
             matches_df,
             index_mapping=index_mapping,
+            pair_edges=prepared_matches.pair_edges,
+        )
+        adjacency_win = sp.csr_matrix(
+            (data, (rows, cols)), shape=(num_nodes, num_nodes)
         )
 
         pagerank_config = PageRankConfig(
@@ -156,11 +165,13 @@ class LogOddsBackend:
             redistribute_dangling=True,
         )
 
-        win_pagerank = pagerank_sparse(
-            rows, cols, data, num_nodes, teleport_vector, pagerank_config
+        win_pagerank = pagerank_from_adjacency(
+            adjacency_win, teleport_vector, pagerank_config
         )
-        loss_pagerank = pagerank_sparse(
-            cols, rows, data, num_nodes, teleport_vector, pagerank_config
+        loss_pagerank = pagerank_from_adjacency(
+            adjacency_win.transpose().tocsr(),
+            teleport_vector,
+            pagerank_config,
         )
 
         lambda_smooth = resolve_lambda(
