@@ -17,8 +17,8 @@ from loopr.core import (
     normalize_edges,
     pagerank_sparse,
 )
-from loopr.core.edges import _build_player_edges_normalized
 from loopr.core.logging import get_logger
+from loopr.core.preparation import prepare_row_edge_inputs
 from loopr.schema import prepare_rank_inputs
 
 
@@ -124,8 +124,7 @@ class RowPRBackend:
         **kwargs,
     ) -> pl.DataFrame:
         """Compute ratings from already-normalized match and player frames."""
-        # Build edges with tournament influence
-        edges = _build_player_edges_normalized(
+        prepared = prepare_row_edge_inputs(
             matches,
             players,
             tournament_influence,
@@ -133,17 +132,14 @@ class RowPRBackend:
             self.decay_rate,
             self.beta,
         )
+        edges = prepared.edges
 
         if edges.is_empty():
             self.logger.warning("No edges built")
             return pl.DataFrame()
 
-        # Get unique nodes
-        all_nodes = set()
-        all_nodes.update(edges["loser_user_id"].unique().to_list())
-        all_nodes.update(edges["winner_user_id"].unique().to_list())
-        node_ids = sorted(list(all_nodes))
-        node_to_idx = {node: idx for idx, node in enumerate(node_ids)}
+        node_ids = prepared.node_ids
+        node_to_idx = prepared.node_to_idx
         n = len(node_ids)
 
         # Compute denominators with smoothing

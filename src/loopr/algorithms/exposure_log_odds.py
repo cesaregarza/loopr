@@ -8,10 +8,7 @@ import polars as pl
 import scipy.sparse as sp
 
 from loopr.algorithms._log_odds_common import (
-    aggregate_entity_metrics,
-    build_index_mapping,
     last_activity_from_metrics,
-    merged_node_ids,
     reporting_exposure,
     resolve_lambda,
     teleport_from_share,
@@ -25,8 +22,8 @@ from loopr.core import (
     build_exposure_triplets,
     pagerank_from_adjacency,
 )
-from loopr.core.convert import _prepare_exposure_matches_normalized
 from loopr.core.logging import get_logger
+from loopr.core.preparation import prepare_exposure_graph
 from loopr.schema import prepare_rank_inputs
 
 if TYPE_CHECKING:
@@ -114,7 +111,7 @@ class ExposureLogOddsEngine:
         # 2) Convert matches into compact per-match lists with roster expansion and weights
         self.logger.info("Converting matches...")
         stage_start = time.perf_counter()
-        prepared_matches = _prepare_exposure_matches_normalized(
+        graph_inputs = prepare_exposure_graph(
             matches,
             participants_df,
             tournament_influence or {},
@@ -122,10 +119,9 @@ class ExposureLogOddsEngine:
             self.config.decay.decay_rate,
             self.config.engine.beta,
             appearances=appearances,
-            include_share=True,
-            streaming=False,
+            active_entities=active_entities,
         )
-        mdf = prepared_matches.matches
+        mdf = graph_inputs.matches
         self._converted_matches_df = mdf
         stage_timings["match_preparation"] = time.perf_counter() - stage_start
         if mdf.is_empty():
@@ -136,20 +132,11 @@ class ExposureLogOddsEngine:
             self.last_stage_timings = stage_timings
             return pl.DataFrame()
 
-        entity_metrics = aggregate_entity_metrics(
-            mdf,
-            precomputed=prepared_matches.entity_metrics,
-        )
+        entity_metrics = graph_inputs.entity_metrics
 
-        # 3) Restrict nodes to active entities, but always include those who
-        #    appeared in matches (subs, late adds). This unions the tick-tock set
-        #    with the IDs present in winners/losers after conversion.
+        # 3) Use the shared graph-prep artifacts for node setup.
         stage_start = time.perf_counter()
-        node_ids = merged_node_ids(
-            mdf,
-            active_entities,
-            aggregated_metrics=entity_metrics,
-        )
+        node_ids = graph_inputs.node_ids
         if not node_ids:
             self.logger.warning(
                 "No active or appeared entities after union; returning empty result."
@@ -158,9 +145,9 @@ class ExposureLogOddsEngine:
             stage_timings["total"] = time.perf_counter() - start_time
             self.last_stage_timings = stage_timings
             return pl.DataFrame()
-        node_to_idx = {pid: idx for idx, pid in enumerate(node_ids)}
+        node_to_idx = graph_inputs.node_to_idx
         num_nodes = len(node_ids)
-        index_mapping = build_index_mapping(node_to_idx)
+        index_mapping = graph_inputs.index_mapping
 
         # 4) Build teleport ρ from exposure mass
         rho = teleport_from_share(
@@ -174,11 +161,7 @@ class ExposureLogOddsEngine:
 
         # 5) Triplets for A_win (loser -> winner), then mirror for A_loss
         stage_start = time.perf_counter()
-        rows, cols, data = build_exposure_triplets(
-            mdf,
-            index_mapping=index_mapping,
-            pair_edges=prepared_matches.pair_edges,
-        )
+        rows, cols, data = build_exposure_triplets(graph_inputs)
         adjacency_win = sp.csr_matrix(
             (data, (rows, cols)), shape=(num_nodes, num_nodes)
         )

@@ -5,80 +5,12 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-
-def build_index_mapping(node_to_idx: dict[int, int]) -> pl.DataFrame:
-    """Materialize a reusable ID->index lookup frame."""
-    valid_items = [
-        (entity_id, idx)
-        for entity_id, idx in node_to_idx.items()
-        if entity_id is not None
-    ]
-    if not valid_items:
-        return pl.DataFrame(schema={"id": pl.Int64, "idx": pl.Int64})
-
-    entity_ids, indices = zip(*valid_items)
-    return pl.DataFrame({"id": list(entity_ids), "idx": list(indices)})
-
-
-def aggregate_entity_metrics(
-    matches_df: pl.DataFrame,
-    *,
-    precomputed: pl.DataFrame | None = None,
-) -> pl.DataFrame:
-    """Aggregate per-entity share, weight, and last activity once."""
-    if precomputed is not None:
-        return precomputed
-
-    if matches_df.is_empty():
-        return pl.DataFrame(
-            schema={
-                "id": pl.Int64,
-                "share": pl.Float64,
-                "weight": pl.Float64,
-                "ts": pl.Float64,
-            }
-        )
-
-    pieces = []
-    value_columns = [
-        column
-        for column in ("share", "weight", "ts")
-        if column in matches_df.columns
-    ]
-
-    for entity_column in ("winners", "losers"):
-        if entity_column not in matches_df.columns:
-            continue
-        pieces.append(
-            matches_df.select(
-                [pl.col(entity_column).alias("id"), *value_columns]
-            ).explode("id")
-        )
-
-    if not pieces:
-        return pl.DataFrame(
-            schema={
-                "id": pl.Int64,
-                "share": pl.Float64,
-                "weight": pl.Float64,
-                "ts": pl.Float64,
-            }
-        )
-
-    aggregations = []
-    if "share" in value_columns:
-        aggregations.append(pl.col("share").sum().alias("share"))
-    if "weight" in value_columns:
-        aggregations.append(pl.col("weight").sum().alias("weight"))
-    if "ts" in value_columns:
-        aggregations.append(pl.col("ts").max().alias("ts"))
-
-    return (
-        pl.concat(pieces)
-        .drop_nulls("id")
-        .group_by("id")
-        .agg(aggregations)
-    )
+from loopr.core.preparation import (
+    aggregate_entity_metrics,
+    appeared_entity_ids,
+    build_index_mapping,
+    merged_node_ids,
+)
 
 
 def _metric_vector_from_aggregated(
@@ -120,39 +52,6 @@ def _metric_vector_from_aggregated(
         if idx is not None:
             vector[idx] = vals[i]
     return vector
-
-
-def appeared_entity_ids(matches_df: pl.DataFrame) -> set[int]:
-    """Return all entities that appear in the normalized winners/losers lists."""
-    entity_ids: set[int] = set()
-    for column in ("winners", "losers"):
-        if column not in matches_df.columns or matches_df.is_empty():
-            continue
-        entity_ids.update(
-            matches_df.select(column)
-            .explode(column)[column]
-            .drop_nulls()
-            .unique()
-            .to_list()
-        )
-    return entity_ids
-
-
-def merged_node_ids(
-    matches_df: pl.DataFrame,
-    active_ids: list[int] | None = None,
-    *,
-    aggregated_metrics: pl.DataFrame | None = None,
-) -> list[int]:
-    """Combine active IDs with actually-appeared IDs in deterministic order."""
-    if aggregated_metrics is not None:
-        merged = set(aggregated_metrics["id"].to_list())
-    else:
-        merged = appeared_entity_ids(matches_df)
-    if active_ids:
-        merged.update(active_ids)
-    return sorted(merged)
-
 
 def _metric_vector(
     matches_df: pl.DataFrame,

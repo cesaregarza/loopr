@@ -7,9 +7,6 @@ import polars as pl
 import scipy.sparse as sp
 
 from loopr.algorithms._log_odds_common import (
-    aggregate_entity_metrics,
-    build_index_mapping,
-    merged_node_ids,
     reporting_exposure,
     resolve_lambda,
     teleport_from_share,
@@ -20,8 +17,8 @@ from loopr.core import (
     build_exposure_triplets,
     pagerank_from_adjacency,
 )
-from loopr.core.convert import _prepare_exposure_matches_normalized
 from loopr.core.logging import get_logger
+from loopr.core.preparation import prepare_exposure_graph
 from loopr.schema import prepare_rank_inputs
 
 
@@ -112,32 +109,25 @@ class LogOddsBackend:
         **kwargs,
     ) -> pl.DataFrame:
         """Compute ratings from already-normalized match and player frames."""
-        prepared_matches = _prepare_exposure_matches_normalized(
+        graph_inputs = prepare_exposure_graph(
             matches,
             players,
             tournament_influence or {},
             self.clock.now,
             self.decay_rate,
             self.beta,
-            include_share=True,
-            streaming=False,
+            active_entities=active_ids or None,
         )
-        matches_df = prepared_matches.matches
+        matches_df = graph_inputs.matches
         if matches_df.is_empty():
             self.logger.warning("No valid matches after conversion")
             return pl.DataFrame()
 
-        entity_metrics = aggregate_entity_metrics(
-            matches_df,
-            precomputed=prepared_matches.entity_metrics,
-        )
-        node_ids = merged_node_ids(
-            matches_df,
-            aggregated_metrics=entity_metrics,
-        )
-        node_to_idx = {player_id: idx for idx, player_id in enumerate(node_ids)}
+        entity_metrics = graph_inputs.entity_metrics
+        node_ids = graph_inputs.node_ids
+        node_to_idx = graph_inputs.node_to_idx
         num_nodes = len(node_ids)
-        index_mapping = build_index_mapping(node_to_idx)
+        index_mapping = graph_inputs.index_mapping
 
         teleport_vector = teleport_from_share(
             matches_df,
@@ -148,11 +138,7 @@ class LogOddsBackend:
         )
         self._last_rho = teleport_vector
 
-        rows, cols, data = build_exposure_triplets(
-            matches_df,
-            index_mapping=index_mapping,
-            pair_edges=prepared_matches.pair_edges,
-        )
+        rows, cols, data = build_exposure_triplets(graph_inputs)
         adjacency_win = sp.csr_matrix(
             (data, (rows, cols)), shape=(num_nodes, num_nodes)
         )

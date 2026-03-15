@@ -21,8 +21,11 @@ from loopr.core import (
     normalize_edges,
     pagerank_sparse,
 )
-from loopr.core.edges import _build_player_edges_normalized
 from loopr.core.logging import get_logger
+from loopr.core.preparation import (
+    participants_by_tournament,
+    prepare_row_edge_inputs,
+)
 from loopr.schema import prepare_rank_inputs
 
 
@@ -110,8 +113,8 @@ class TickTockEngine:
             tick_history.append(tick_result["pagerank"])
 
             # Build participants *who actually played* (legacy parity)
-            participants = self._participants_by_tournament_played(
-                matches, players
+            participants = participants_by_tournament(
+                tick_result["resolved_matches"]
             )
 
             # Legacy-compatible influence computation (id-keyed with prior)
@@ -204,7 +207,7 @@ class TickTockEngine:
         players: pl.DataFrame,
         tournament_influence: dict[int, float],
     ) -> dict:
-        edges = _build_player_edges_normalized(
+        prepared = prepare_row_edge_inputs(
             matches,
             players,
             tournament_influence,
@@ -212,6 +215,7 @@ class TickTockEngine:
             self.config.decay.decay_rate,
             self.config.engine.beta,
         )
+        edges = prepared.edges
         if edges.is_empty():
             return {
                 "pagerank": np.array([]),
@@ -219,13 +223,11 @@ class TickTockEngine:
                 "node_to_idx": {},
                 "edges": edges,
                 "denominators": None,
+                "resolved_matches": prepared.matches,
             }
 
-        # Nodes
-        ids = set(edges["loser_user_id"].unique().to_list())
-        ids.update(edges["winner_user_id"].unique().to_list())
-        node_ids = sorted(list(ids))
-        node_to_idx = {n: i for i, n in enumerate(node_ids)}
+        node_ids = prepared.node_ids
+        node_to_idx = prepared.node_to_idx
         n = len(node_ids)
 
         # Denominators + normalization (legacy smoothing semantics)
@@ -265,40 +267,8 @@ class TickTockEngine:
             "node_to_idx": node_to_idx,
             "edges": edges,
             "denominators": denoms,
+            "resolved_matches": prepared.matches,
         }
-
-    # ------------------------------------------------------ participants (played)
-    def _participants_by_tournament_played(
-        self,
-        matches: pl.DataFrame,
-        players: pl.DataFrame,
-    ) -> dict[int, list]:
-        """Players who actually appeared in a tournament (join used teams -> rosters).
-
-        Uses a dict-based approach instead of multiple Polars joins for speed.
-        """
-        # Build roster lookup: (tournament_id, team_id) → set of user_ids
-        roster_lookup: dict[tuple[int, int], set] = {}
-        for row in players.select(
-            ["tournament_id", "team_id", "user_id"]
-        ).iter_rows():
-            key = (int(row[0]), int(row[1]))
-            roster_lookup.setdefault(key, set()).add(row[2])
-
-        # Scan matches to collect participants per tournament
-        result: dict[int, set] = {}
-        t_ids = matches["tournament_id"].to_list()
-        w_ids = matches["winner_team_id"].to_list()
-        l_ids = matches["loser_team_id"].to_list()
-        for i in range(len(t_ids)):
-            tid = int(t_ids[i])
-            participants = result.setdefault(tid, set())
-            for team_id in (int(w_ids[i]), int(l_ids[i])):
-                roster = roster_lookup.get((tid, team_id))
-                if roster:
-                    participants.update(roster)
-
-        return {tid: list(pids) for tid, pids in result.items()}
 
     # ------------------------------------------------------ legacy-compatible tock
     def _compute_tournament_influence_compat(
