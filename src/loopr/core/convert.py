@@ -9,12 +9,16 @@ import polars as pl
 from loopr.core.preparation import (
     PreparedGraphInputs,
     prepare_exposure_graph,
+    prepare_weighted_positional_results,
     resolve_match_participants,
     prepare_weighted_matches,
+    resolve_positional_results,
 )
 from loopr.schema import (
+    prepare_appearances_frame,
     prepare_matches_frame,
     prepare_participants_frame,
+    prepare_positional_results_frame,
     prepare_rank_inputs,
 )
 
@@ -27,7 +31,7 @@ PreparedExposureMatches = PreparedGraphInputs
 
 def _prepare_exposure_matches_normalized(
     matches: pl.DataFrame,
-    players: pl.DataFrame,
+    players: pl.DataFrame | None,
     tournament_influence: dict[int, float],
     now_timestamp: float,
     decay_rate: float,
@@ -37,6 +41,8 @@ def _prepare_exposure_matches_normalized(
     appearances: pl.DataFrame | None = None,
     include_share: bool = True,
     streaming: bool = False,
+    result_mode: str = "teams",
+    positional_weight_mode: str = "pairwise_full",
 ) -> PreparedExposureMatches:
     """Build reusable exposure intermediates from already-normalized inputs."""
     del streaming  # retained for API compatibility
@@ -55,12 +61,14 @@ def _prepare_exposure_matches_normalized(
         beta,
         rosters=rosters,
         appearances=appearances,
+        result_mode=result_mode,
+        positional_weight_mode=positional_weight_mode,
     )
 
 
 def convert_matches_dataframe(
     matches: pl.DataFrame,
-    players: pl.DataFrame,
+    players: pl.DataFrame | None,
     tournament_influence: dict[int, float],
     now_timestamp: float,
     decay_rate: float,
@@ -70,29 +78,47 @@ def convert_matches_dataframe(
     appearances: pl.DataFrame | None = None,
     include_share: bool = True,
     streaming: bool = False,
+    result_mode: str = "teams",
+    positional_weight_mode: str = "pairwise_full",
 ) -> pl.DataFrame:
     """Build a compact matches table with winners/losers lists and weights."""
-    prepared = prepare_rank_inputs(matches, players, appearances)
+    if result_mode == "positional":
+        prepared_matches = prepare_positional_results_frame(matches)
+        prepared_players = (
+            prepare_participants_frame(players)
+            if players is not None
+            and {"event_id", "group_id", "entity_id"}.issubset(players.columns)
+            else players
+        )
+        prepared_appearances = prepare_appearances_frame(appearances)
+    else:
+        prepared = prepare_rank_inputs(matches, players, appearances)
+        prepared_matches = prepared.matches
+        prepared_players = prepared.participants
+        prepared_appearances = prepared.appearances
+
     rosters = (
         prepare_participants_frame(rosters) if rosters is not None else None
     )
     return _convert_matches_dataframe_normalized(
-        prepared.matches,
-        prepared.participants,
+        prepared_matches,
+        prepared_players,
         tournament_influence,
         now_timestamp,
         decay_rate,
         beta,
         rosters=rosters,
-        appearances=prepared.appearances,
+        appearances=prepared_appearances,
         include_share=include_share,
         streaming=streaming,
+        result_mode=result_mode,
+        positional_weight_mode=positional_weight_mode,
     )
 
 
 def _convert_matches_dataframe_normalized(
     matches: pl.DataFrame,
-    players: pl.DataFrame,
+    players: pl.DataFrame | None,
     tournament_influence: dict[int, float],
     now_timestamp: float,
     decay_rate: float,
@@ -102,6 +128,8 @@ def _convert_matches_dataframe_normalized(
     appearances: pl.DataFrame | None = None,
     include_share: bool = True,
     streaming: bool = False,
+    result_mode: str = "teams",
+    positional_weight_mode: str = "pairwise_full",
 ) -> pl.DataFrame:
     """Internal conversion path that assumes all inputs are already normalized."""
     del streaming  # retained for API compatibility
@@ -116,53 +144,91 @@ def _convert_matches_dataframe_normalized(
             beta,
             rosters=rosters,
             appearances=appearances,
+            result_mode=result_mode,
+            positional_weight_mode=positional_weight_mode,
         )
         return prepared.matches
 
-    weighted = prepare_weighted_matches(
-        matches,
-        tournament_influence,
-        now_timestamp,
-        decay_rate,
-        beta,
-    )
-    resolved = resolve_match_participants(
-        weighted,
-        players,
-        rosters=rosters,
-        appearances=appearances,
-        include_share=False,
-    )
+    if result_mode == "positional":
+        weighted = prepare_weighted_positional_results(
+            matches,
+            tournament_influence,
+            now_timestamp,
+            decay_rate,
+            beta,
+        )
+        resolved = resolve_positional_results(
+            weighted,
+            players,
+            rosters=rosters,
+            appearances=appearances,
+            include_share=False,
+            positional_weight_mode=positional_weight_mode,
+        )
+    else:
+        weighted = prepare_weighted_matches(
+            matches,
+            tournament_influence,
+            now_timestamp,
+            decay_rate,
+            beta,
+        )
+        resolved = resolve_match_participants(
+            weighted,
+            players,
+            rosters=rosters,
+            appearances=appearances,
+            include_share=False,
+        )
     return resolved.matches
 
 
 def convert_matches_format(
     matches: pl.DataFrame,
-    players: pl.DataFrame,
+    players: pl.DataFrame | None,
     tournament_influence: dict[int, float],
     now_timestamp: float,
     decay_rate: float,
     beta: float = 0.0,
+    *,
+    result_mode: str = "teams",
+    positional_weight_mode: str = "pairwise_full",
 ) -> list[dict[str, Any]]:
     """Convert matches to the historical list-of-dicts format."""
-    prepared = prepare_rank_inputs(matches, players)
+    if result_mode == "positional":
+        prepared_matches = prepare_positional_results_frame(matches)
+        prepared_players = (
+            prepare_participants_frame(players)
+            if players is not None
+            and {"event_id", "group_id", "entity_id"}.issubset(players.columns)
+            else players
+        )
+    else:
+        prepared = prepare_rank_inputs(matches, players)
+        prepared_matches = prepared.matches
+        prepared_players = prepared.participants
     return _convert_matches_format_normalized(
-        prepared.matches,
-        prepared.participants,
+        prepared_matches,
+        prepared_players,
         tournament_influence,
         now_timestamp,
         decay_rate,
         beta,
+        result_mode=result_mode,
+        positional_weight_mode=positional_weight_mode,
     )
 
 
 def _convert_matches_format_normalized(
     matches: pl.DataFrame,
-    players: pl.DataFrame,
+    players: pl.DataFrame | None,
     tournament_influence: dict[int, float],
     now_timestamp: float,
     decay_rate: float,
     beta: float = 0.0,
+    *,
+    result_mode: str = "teams",
+    positional_weight_mode: str = "pairwise_full",
 ) -> list[dict[str, Any]]:
     """Internal fallback conversion path for already-normalized inputs."""
     converted = _convert_matches_dataframe_normalized(
@@ -173,6 +239,8 @@ def _convert_matches_format_normalized(
         decay_rate,
         beta,
         include_share=False,
+        result_mode=result_mode,
+        positional_weight_mode=positional_weight_mode,
     )
     return [
         {
