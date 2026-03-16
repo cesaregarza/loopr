@@ -459,11 +459,7 @@ class ExposureLogOddsEngine:
 
         engine = TickTockEngine(self.config.tick_tock)
         # Pass deterministic time if we were given one
-        if hasattr(self.clock, "now"):
-            try:
-                engine.clock = self.clock
-            except Exception:
-                pass
+        engine.clock = self.clock
 
         tt_df = engine._rank_internal(matches, participants)
         active_entities = tt_df["player_id"].to_list()

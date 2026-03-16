@@ -5,6 +5,13 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from loopr.core.constants import (
+    LAMBDA_TARGET_FRACTION,
+    LOSERS,
+    SHARE,
+    WEIGHT,
+    WINNERS,
+)
 from loopr.core.preparation import (
     aggregate_entity_metrics,
     appeared_entity_ids,
@@ -76,7 +83,7 @@ def _metric_vector(
         return np.zeros(len(node_to_idx), dtype=float)
 
     pieces = []
-    for entity_column in ("winners", "losers"):
+    for entity_column in (WINNERS, LOSERS):
         if entity_column not in matches_df.columns:
             continue
         pieces.append(
@@ -114,7 +121,7 @@ def teleport_from_share(
     rho = _metric_vector(
         matches_df,
         node_to_idx,
-        "share",
+        SHARE,
         "e_share",
         aggregated_metrics=aggregated_metrics,
         index_mapping=index_mapping,
@@ -137,7 +144,7 @@ def reporting_exposure(
     return _metric_vector(
         matches_df,
         node_to_idx,
-        "weight",
+        WEIGHT,
         "exposure",
         aggregated_metrics=aggregated_metrics,
         index_mapping=index_mapping,
@@ -173,7 +180,7 @@ def resolve_lambda(
     if fixed_lambda is not None:
         return float(fixed_lambda)
     if lambda_mode == "auto":
-        target = 0.025 * float(np.median(win_pagerank))
+        target = LAMBDA_TARGET_FRACTION * float(np.median(win_pagerank))
         median_rho = float(np.median(rho))
         return 0.0 if median_rho == 0.0 else max(target / median_rho, 0.0)
     return fallback

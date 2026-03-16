@@ -7,6 +7,20 @@ from typing import Any
 
 import polars as pl
 
+from loopr.core.constants import (
+    LOSERS,
+    LOSER_USER_ID,
+    MATCH_ID,
+    NORMALIZED_WEIGHT,
+    SECONDS_PER_DAY,
+    SHARE,
+    TOURNAMENT_ID,
+    WEIGHT,
+    WEIGHT_SUM,
+    WINNERS,
+    WINNER_USER_ID,
+)
+
 
 @dataclass(frozen=True)
 class WeightedMatches:
@@ -121,11 +135,11 @@ def aggregate_entity_metrics(
     pieces = []
     value_columns = [
         column
-        for column in ("share", "weight", "ts")
+        for column in (SHARE, WEIGHT, "ts")
         if column in matches_df.columns
     ]
 
-    for entity_column in ("winners", "losers"):
+    for entity_column in (WINNERS, LOSERS):
         if entity_column not in matches_df.columns:
             continue
         pieces.append(
@@ -140,10 +154,10 @@ def aggregate_entity_metrics(
         return _empty_entity_metrics()
 
     aggregations = []
-    if "share" in value_columns:
-        aggregations.append(pl.col("share").sum().alias("share"))
-    if "weight" in value_columns:
-        aggregations.append(pl.col("weight").sum().alias("weight"))
+    if SHARE in value_columns:
+        aggregations.append(pl.col(SHARE).sum().alias(SHARE))
+    if WEIGHT in value_columns:
+        aggregations.append(pl.col(WEIGHT).sum().alias(WEIGHT))
     if "ts" in value_columns:
         aggregations.append(pl.col("ts").max().alias("ts"))
 
@@ -153,7 +167,7 @@ def aggregate_entity_metrics(
 def appeared_entity_ids(matches_df: pl.DataFrame) -> set[int]:
     """Return all entities that appear in the normalized winners/losers lists."""
     entity_ids: set[int] = set()
-    for column in ("winners", "losers"):
+    for column in (WINNERS, LOSERS):
         if column not in matches_df.columns or matches_df.is_empty():
             continue
         entity_ids.update(
@@ -207,13 +221,13 @@ def prepare_weighted_matches(
     if tournament_influence:
         strength_dataframe = pl.DataFrame(
             {
-                "tournament_id": list(tournament_influence.keys()),
+                TOURNAMENT_ID: list(tournament_influence.keys()),
                 "tournament_strength": list(tournament_influence.values()),
             }
         )
         match_data = match_data.join(
             strength_dataframe,
-            on="tournament_id",
+            on=TOURNAMENT_ID,
             how="left",
             coalesce=True,
         ).with_columns(pl.col("tournament_strength").fill_null(1.0))
@@ -242,7 +256,7 @@ def prepare_weighted_matches(
         )
 
     time_decay_factor = (
-        ((pl.lit(float(now_timestamp)) - pl.col("ts")) / 86400.0)
+        ((pl.lit(float(now_timestamp)) - pl.col("ts")) / SECONDS_PER_DAY)
         .mul(-decay_rate)
         .exp()
     )
@@ -253,7 +267,7 @@ def prepare_weighted_matches(
             pl.col("tournament_strength") ** beta
         )
 
-    match_data = match_data.with_columns(weight_expression.alias("weight"))
+    match_data = match_data.with_columns(weight_expression.alias(WEIGHT))
     return WeightedMatches(match_data)
 
 
@@ -318,11 +332,11 @@ def _assign_match_rosters(
 
     match_data = weighted_matches.join(
         winner_rosters,
-        on=["tournament_id", "winner_team_id"],
+        on=[TOURNAMENT_ID, "winner_team_id"],
         how="left",
     ).join(
         loser_rosters,
-        on=["tournament_id", "loser_team_id"],
+        on=[TOURNAMENT_ID, "loser_team_id"],
         how="left",
     )
 
@@ -335,11 +349,11 @@ def _assign_match_rosters(
         )
         match_data = match_data.join(
             winner_appearances,
-            on=["tournament_id", "match_id", "winner_team_id"],
+            on=[TOURNAMENT_ID, MATCH_ID, "winner_team_id"],
             how="left",
         ).join(
             loser_appearances,
-            on=["tournament_id", "match_id", "loser_team_id"],
+            on=[TOURNAMENT_ID, MATCH_ID, "loser_team_id"],
             how="left",
         )
 
@@ -347,25 +361,25 @@ def _assign_match_rosters(
             pl.when(pl.col("winner_appearance").is_not_null())
             .then(pl.col("winner_appearance"))
             .otherwise(pl.col("winner_roster"))
-            .alias("winners")
+            .alias(WINNERS)
         )
         losers_expr = (
             pl.when(pl.col("loser_appearance").is_not_null())
             .then(pl.col("loser_appearance"))
             .otherwise(pl.col("loser_roster"))
-            .alias("losers")
+            .alias(LOSERS)
         )
     else:
-        winners_expr = pl.col("winner_roster").alias("winners")
-        losers_expr = pl.col("loser_roster").alias("losers")
+        winners_expr = pl.col("winner_roster").alias(WINNERS)
+        losers_expr = pl.col("loser_roster").alias(LOSERS)
 
     return (
         match_data.with_columns([winners_expr, losers_expr])
         .filter(
-            pl.col("winners").is_not_null()
-            & pl.col("losers").is_not_null()
-            & (pl.col("winners").list.len() > 0)
-            & (pl.col("losers").list.len() > 0)
+            pl.col(WINNERS).is_not_null()
+            & pl.col(LOSERS).is_not_null()
+            & (pl.col(WINNERS).list.len() > 0)
+            & (pl.col(LOSERS).list.len() > 0)
         )
     )
 
@@ -410,26 +424,26 @@ def resolve_match_participants(
     if include_share:
         match_data = match_data.with_columns(
             [
-                pl.col("winners").list.len().alias("winner_count"),
-                pl.col("losers").list.len().alias("loser_count"),
+                pl.col(WINNERS).list.len().alias("winner_count"),
+                pl.col(LOSERS).list.len().alias("loser_count"),
             ]
         ).with_columns(
             (
-                pl.col("weight")
+                pl.col(WEIGHT)
                 / (pl.col("winner_count") * pl.col("loser_count"))
-            ).alias("share")
+            ).alias(SHARE)
         )
 
     final_columns = [
-        "match_id",
-        "tournament_id",
-        "winners",
-        "losers",
-        "weight",
+        MATCH_ID,
+        TOURNAMENT_ID,
+        WINNERS,
+        LOSERS,
+        WEIGHT,
         "ts",
     ]
     if include_share:
-        final_columns.extend(["winner_count", "loser_count", "share"])
+        final_columns.extend(["winner_count", "loser_count", SHARE])
 
     return ResolvedMatches(
         weighted_matches=weighted_df,
@@ -438,18 +452,18 @@ def resolve_match_participants(
 
 
 def _build_exposure_pair_edges(matches_df: pl.DataFrame) -> pl.DataFrame:
-    if matches_df.is_empty() or "share" not in matches_df.columns:
+    if matches_df.is_empty() or SHARE not in matches_df.columns:
         return _empty_pair_edges()
 
     return (
-        matches_df.select(["winners", "losers", "share"])
-        .explode("winners")
-        .drop_nulls("winners")
-        .explode("losers")
-        .drop_nulls("losers")
-        .group_by(["winners", "losers"])
-        .agg(pl.col("share").sum().alias("share"))
-        .rename({"winners": "winner_id", "losers": "loser_id"})
+        matches_df.select([WINNERS, LOSERS, SHARE])
+        .explode(WINNERS)
+        .drop_nulls(WINNERS)
+        .explode(LOSERS)
+        .drop_nulls(LOSERS)
+        .group_by([WINNERS, LOSERS])
+        .agg(pl.col(SHARE).sum().alias(SHARE))
+        .rename({WINNERS: "winner_id", LOSERS: "loser_id"})
     )
 
 
@@ -489,14 +503,14 @@ def _build_row_edge_dataframe(matches_df: pl.DataFrame) -> pl.DataFrame:
         return _empty_row_edges()
 
     return (
-        matches_df.select(["winners", "losers", "weight"])
-        .explode("winners")
-        .drop_nulls("winners")
-        .explode("losers")
-        .drop_nulls("losers")
-        .group_by(["losers", "winners"])
-        .agg(pl.col("weight").sum().alias("weight_sum"))
-        .rename({"losers": "loser_user_id", "winners": "winner_user_id"})
+        matches_df.select([WINNERS, LOSERS, WEIGHT])
+        .explode(WINNERS)
+        .drop_nulls(WINNERS)
+        .explode(LOSERS)
+        .drop_nulls(LOSERS)
+        .group_by([LOSERS, WINNERS])
+        .agg(pl.col(WEIGHT).sum().alias(WEIGHT_SUM))
+        .rename({LOSERS: LOSER_USER_ID, WINNERS: WINNER_USER_ID})
     )
 
 
@@ -519,8 +533,8 @@ def prepare_row_edges(
         )
 
     node_ids = sorted(
-        set(edges["loser_user_id"].unique().to_list())
-        | set(edges["winner_user_id"].unique().to_list())
+        set(edges[LOSER_USER_ID].unique().to_list())
+        | set(edges[WINNER_USER_ID].unique().to_list())
     )
     node_to_idx = {entity_id: idx for idx, entity_id in enumerate(node_ids)}
     return PreparedRowEdges(
@@ -544,7 +558,7 @@ def build_team_edge_dataframe(
         return pl.DataFrame([])
 
     return weighted_df.group_by(["loser_team_id", "winner_team_id"]).agg(
-        pl.col("weight").sum().alias("weight_sum")
+        pl.col(WEIGHT).sum().alias(WEIGHT_SUM)
     )
 
 
@@ -554,12 +568,12 @@ def participants_by_tournament(matches_df: pl.DataFrame) -> dict[int, list[int]]
         return {}
 
     pieces = []
-    for entity_column in ("winners", "losers"):
+    for entity_column in (WINNERS, LOSERS):
         if entity_column not in matches_df.columns:
             continue
         pieces.append(
             matches_df.select(
-                ["tournament_id", pl.col(entity_column).alias("entity_id")]
+                [TOURNAMENT_ID, pl.col(entity_column).alias("entity_id")]
             )
             .explode("entity_id")
             .drop_nulls("entity_id")
@@ -570,12 +584,12 @@ def participants_by_tournament(matches_df: pl.DataFrame) -> dict[int, list[int]]
 
     participants = (
         pl.concat(pieces)
-        .group_by("tournament_id")
+        .group_by(TOURNAMENT_ID)
         .agg(pl.col("entity_id").unique().sort())
     )
     return dict(
         zip(
-            participants["tournament_id"].to_list(),
+            participants[TOURNAMENT_ID].to_list(),
             participants["entity_id"].to_list(),
         )
     )

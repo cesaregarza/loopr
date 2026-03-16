@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 
+from loopr.core.constants import SECONDS_PER_DAY
+
 if TYPE_CHECKING:
     from typing import Any
 
@@ -45,7 +47,7 @@ class Clock:
         Returns:
             Timestamp for N days ago.
         """
-        return self.now - (days * 86400.0)
+        return self.now - (days * SECONDS_PER_DAY)
 
     def days_since(self, timestamp: float) -> float:
         """Calculate days since given timestamp.
@@ -56,7 +58,7 @@ class Clock:
         Returns:
             Number of days since the timestamp.
         """
-        return (self.now - timestamp) / 86400.0
+        return (self.now - timestamp) / SECONDS_PER_DAY
 
 
 def event_ts_expr(
@@ -113,7 +115,7 @@ def decay_expr(
         Polars expression for decay factor.
     """
     return (
-        ((now_timestamp - pl.col(timestamp_column).cast(pl.Float64)) / 86400.0)
+        ((now_timestamp - pl.col(timestamp_column).cast(pl.Float64)) / SECONDS_PER_DAY)
         .mul(-decay_rate)
         .exp()
     )
@@ -140,7 +142,7 @@ def compute_decay_factor(
         return np.ones_like(timestamp_array)
 
     decay_rate = np.log(2) / half_life_days
-    days_elapsed = (now_timestamp - timestamp_array) / 86400.0
+    days_elapsed = (now_timestamp - timestamp_array) / SECONDS_PER_DAY
 
     return np.exp(-decay_rate * days_elapsed)
 
@@ -166,7 +168,7 @@ def apply_inactivity_decay(
     Returns:
         Decayed scores.
     """
-    days_inactive = (now_timestamp - last_activity) / 86400.0
+    days_inactive = (now_timestamp - last_activity) / SECONDS_PER_DAY
 
     decay_days = np.maximum(0, days_inactive - delay_days)
 
@@ -192,7 +194,7 @@ def filter_by_recency(
     Returns:
         Filtered DataFrame.
     """
-    cutoff_timestamp = now_timestamp - (max_days * 86400.0)
+    cutoff_timestamp = now_timestamp - (max_days * SECONDS_PER_DAY)
     return dataframe.filter(pl.col(timestamp_column) >= cutoff_timestamp)
 
 
@@ -219,7 +221,7 @@ def add_time_features(
     """
     return dataframe.with_columns(
         [
-            ((now_timestamp - pl.col(timestamp_column)) / 86400.0).alias(
+            ((now_timestamp - pl.col(timestamp_column)) / SECONDS_PER_DAY).alias(
                 "days_ago"
             ),
             pl.from_epoch(pl.col(timestamp_column))
@@ -255,8 +257,8 @@ def create_time_windows(
     if stride_days is None:
         stride_days = window_days
 
-    window_size = window_days * 86400.0
-    stride = stride_days * 86400.0
+    window_size = window_days * SECONDS_PER_DAY
+    stride = stride_days * SECONDS_PER_DAY
 
     windows = []
     current_start = start_timestamp

@@ -7,6 +7,15 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 
+from loopr.core.constants import (
+    LOSERS,
+    LOSER_USER_ID,
+    NORMALIZED_WEIGHT,
+    SHARE,
+    WEIGHT_SUM,
+    WINNERS,
+    WINNER_USER_ID,
+)
 from loopr.core.preparation import (
     PreparedGraphInputs,
     build_team_edge_dataframe,
@@ -17,6 +26,8 @@ from loopr.schema import prepare_matches_frame, prepare_rank_inputs
 
 if TYPE_CHECKING:
     from typing import Any
+
+    from loopr.core.smoothing import SmoothingStrategy
 
 
 def build_player_edges(
@@ -152,14 +163,14 @@ def build_exposure_triplets(
                 np.array([], dtype=np.float64),
             )
         pair_edges = (
-            matches_df.select(["winners", "losers", "share"])
-            .explode("winners")
-            .drop_nulls("winners")
-            .explode("losers")
-            .drop_nulls("losers")
-            .group_by(["winners", "losers"])
-            .agg(pl.col("share").sum().alias("share"))
-            .rename({"winners": "winner_id", "losers": "loser_id"})
+            matches_df.select([WINNERS, LOSERS, SHARE])
+            .explode(WINNERS)
+            .drop_nulls(WINNERS)
+            .explode(LOSERS)
+            .drop_nulls(LOSERS)
+            .group_by([WINNERS, LOSERS])
+            .agg(pl.col(SHARE).sum().alias(SHARE))
+            .rename({WINNERS: "winner_id", LOSERS: "loser_id"})
         )
     elif pair_edges.is_empty():
         return (
@@ -199,10 +210,10 @@ def build_exposure_triplets(
 
 def compute_denominators(
     edges: pl.DataFrame,
-    smoothing_strategy,
-    loser_column: str = "loser_user_id",
-    winner_column: str = "winner_user_id",
-    weight_column: str = "weight_sum",
+    smoothing_strategy: SmoothingStrategy | None,
+    loser_column: str = LOSER_USER_ID,
+    winner_column: str = WINNER_USER_ID,
+    weight_column: str = WEIGHT_SUM,
 ) -> pl.DataFrame:
     """Compute denominators with smoothing for edge normalization."""
     loss_sums: dict = {}
@@ -243,8 +254,8 @@ def compute_denominators(
 def normalize_edges(
     edges: pl.DataFrame,
     denominators: pl.DataFrame,
-    loser_column: str = "loser_user_id",
-    weight_column: str = "weight_sum",
+    loser_column: str = LOSER_USER_ID,
+    weight_column: str = WEIGHT_SUM,
 ) -> pl.DataFrame:
     """Normalize edge weights by denominators."""
     denom_dict = dict(
@@ -262,7 +273,7 @@ def normalize_edges(
         normalized[i] = weights[i] / denom if denom != 0.0 else 0.0
 
     return edges.with_columns(
-        pl.Series("normalized_weight", normalized),
+        pl.Series(NORMALIZED_WEIGHT, normalized),
         pl.Series("denom", [denom_dict.get(loser_id, 1.0) for loser_id in loser_ids]),
     )
 
@@ -272,7 +283,7 @@ def edges_to_triplets(
     node_to_index: dict[Any, int],
     source_column: str,
     target_column: str,
-    weight_column: str = "weight_sum",
+    weight_column: str = WEIGHT_SUM,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Convert edge DataFrame to COO triplets."""
     source_ids = edges[source_column].to_list()

@@ -7,9 +7,15 @@ import logging
 import numpy as np
 import polars as pl
 
+from loopr.core.constants import (
+    LOSER_USER_ID,
+    NORMALIZED_WEIGHT,
+    WINNER_USER_ID,
+)
 from loopr.core import (
     Clock,
     PageRankConfig,
+    TickTockConfig,
     VolumeInverseTeleport,
     WinsProportional,
     compute_denominators,
@@ -32,19 +38,22 @@ class RowPRBackend:
 
     def __init__(
         self,
-        decay_rate: float = 0.00385,
-        beta: float = 1.0,
-        alpha: float = 0.85,
-        teleport_mode: str = "volume_inverse",
-        smoothing_gamma: float = 0.02,
-        smoothing_cap_ratio: float = 1.0,
-        pagerank_tol: float = 1e-8,
-        pagerank_max_iter: int = 200,
+        config: TickTockConfig | None = None,
+        *,
+        decay_rate: float | None = None,
+        beta: float | None = None,
+        alpha: float | None = None,
+        teleport_mode: str | None = None,
+        smoothing_gamma: float | None = None,
+        smoothing_cap_ratio: float | None = None,
+        pagerank_tol: float | None = None,
+        pagerank_max_iter: int | None = None,
     ):
         """
         Initialize the row PageRank backend.
 
         Args:
+            config: Configuration object. Keyword args override config values.
             decay_rate: Time decay rate
             beta: Tournament influence exponent
             alpha: PageRank damping factor
@@ -54,20 +63,21 @@ class RowPRBackend:
             pagerank_tol: PageRank convergence tolerance
             pagerank_max_iter: Maximum PageRank iterations
         """
-        self.decay_rate = decay_rate
-        self.beta = beta
-        self.alpha = alpha
-        self.teleport_mode = teleport_mode
-        self.smoothing_gamma = smoothing_gamma
-        self.smoothing_cap_ratio = smoothing_cap_ratio
-        self.pagerank_tol = pagerank_tol
-        self.pagerank_max_iter = pagerank_max_iter
+        cfg = config or TickTockConfig()
+        self.decay_rate = decay_rate if decay_rate is not None else cfg.decay.decay_rate
+        self.beta = beta if beta is not None else cfg.engine.beta
+        self.alpha = alpha if alpha is not None else cfg.pagerank.alpha
+        self.teleport_mode = teleport_mode if teleport_mode is not None else cfg.teleport_mode
+        self.smoothing_gamma = smoothing_gamma if smoothing_gamma is not None else cfg.engine.gamma
+        self.smoothing_cap_ratio = smoothing_cap_ratio if smoothing_cap_ratio is not None else cfg.engine.cap_ratio
+        self.pagerank_tol = pagerank_tol if pagerank_tol is not None else cfg.pagerank.tol
+        self.pagerank_max_iter = pagerank_max_iter if pagerank_max_iter is not None else cfg.pagerank.max_iter
 
         self.logger = get_logger(self.__class__.__name__)
         self.clock = Clock()
 
         # Initialize teleport strategy
-        if teleport_mode == "volume_inverse":
+        if self.teleport_mode == "volume_inverse":
             self.teleport_strategy = VolumeInverseTeleport()
         else:
             from loopr.core import UniformTeleport
@@ -76,15 +86,15 @@ class RowPRBackend:
 
         # Initialize smoothing strategy
         self.smoothing_strategy = WinsProportional(
-            gamma=smoothing_gamma,
-            cap_ratio=smoothing_cap_ratio,
+            gamma=self.smoothing_gamma,
+            cap_ratio=self.smoothing_cap_ratio,
         )
 
     def compute(
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame | None,
-        active_ids: list,
+        active_ids: list[int],
         tournament_influence: dict[int, float],
         **kwargs,
     ) -> pl.DataFrame:
@@ -119,7 +129,7 @@ class RowPRBackend:
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-        active_ids: list,
+        active_ids: list[int],
         tournament_influence: dict[int, float],
         **kwargs,
     ) -> pl.DataFrame:
@@ -146,31 +156,31 @@ class RowPRBackend:
         denominators = compute_denominators(
             edges,
             self.smoothing_strategy,
-            loser_column="loser_user_id",
-            winner_column="winner_user_id",
+            loser_column=LOSER_USER_ID,
+            winner_column=WINNER_USER_ID,
         )
 
         # Normalize edges
         edges = normalize_edges(
             edges,
             denominators,
-            loser_column="loser_user_id",
+            loser_column=LOSER_USER_ID,
         )
 
         # Convert to triplets
         rows, cols, weights = edges_to_triplets(
             edges,
             node_to_idx,
-            source_column="loser_user_id",
-            target_column="winner_user_id",
-            weight_column="normalized_weight",
+            source_column=LOSER_USER_ID,
+            target_column=WINNER_USER_ID,
+            weight_column=NORMALIZED_WEIGHT,
         )
 
         # Compute teleport vector
         teleport = self.teleport_strategy(
             node_ids,
             edges,
-            "loser_user_id",
+            LOSER_USER_ID,
         )
 
         # Run PageRank

@@ -1,5 +1,6 @@
 """Core utilities shared by LOOPR ranking engines."""
 
+from loopr.core import constants  # noqa: F401
 from loopr.core.config import (
     DecayConfig,
     EngineConfig,

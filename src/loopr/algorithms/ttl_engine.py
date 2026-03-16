@@ -56,15 +56,7 @@ class TTLEngine:
 
         # Initialize backend if not provided
         if backend is None:
-            backend = LogOddsBackend(
-                decay_rate=self.config.decay.decay_rate,
-                beta=self.config.engine.beta,
-                alpha=self.config.pagerank.alpha,
-                lambda_mode=self.config.lambda_mode,
-                fixed_lambda=self.config.fixed_lambda,
-                pagerank_tol=self.config.pagerank.tol,
-                pagerank_max_iter=self.config.pagerank.max_iter,
-            )
+            backend = LogOddsBackend(config=self.config)
         self.backend = backend
 
         # Initialize clock
@@ -81,7 +73,7 @@ class TTLEngine:
         self,
         matches: pl.DataFrame,
         participants: pl.DataFrame,
-        initial_influence: Optional[dict[int, float]] = None,
+        initial_influence: dict[int, float] | None = None,
     ) -> pl.DataFrame:
         """
         Rank prepared entities using the TTL algorithm.
@@ -301,7 +293,7 @@ class TTLEngine:
         self,
         matches: pl.DataFrame,
         participants: pl.DataFrame,
-        initial_influence: Optional[dict[int, float]] = None,
+        initial_influence: dict[int, float] | None = None,
     ) -> pl.DataFrame:
         """Validate neutral inputs and return `entity_id` rankings."""
         inputs = prepare_rank_inputs(matches, participants)
@@ -318,7 +310,7 @@ class TTLEngine:
         self,
         matches: pl.DataFrame,
         players: pl.DataFrame,
-    ) -> dict[int, list]:
+    ) -> dict[int, list[int]]:
         """Get mapping of tournament ID to participant IDs."""
         participants = (
             players.select(["tournament_id", "user_id"])

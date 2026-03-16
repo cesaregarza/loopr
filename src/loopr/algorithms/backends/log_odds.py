@@ -13,6 +13,7 @@ from loopr.algorithms._log_odds_common import (
 )
 from loopr.core import (
     Clock,
+    ExposureLogOddsConfig,
     PageRankConfig,
     build_exposure_triplets,
     pagerank_from_adjacency,
@@ -31,18 +32,21 @@ class LogOddsBackend:
 
     def __init__(
         self,
-        decay_rate: float = 0.00385,
-        beta: float = 1.0,
-        alpha: float = 0.85,
-        lambda_mode: str = "auto",
+        config: ExposureLogOddsConfig | None = None,
+        *,
+        decay_rate: float | None = None,
+        beta: float | None = None,
+        alpha: float | None = None,
+        lambda_mode: str | None = None,
         fixed_lambda: float | None = None,
-        pagerank_tol: float = 1e-8,
-        pagerank_max_iter: int = 200,
+        pagerank_tol: float | None = None,
+        pagerank_max_iter: int | None = None,
         epsilon: float = 1e-9,
     ) -> None:
         """Initialize the log-odds backend.
 
         Args:
+            config: Configuration object. Keyword args override config values.
             decay_rate: Time decay rate for match weights.
             beta: Tournament influence exponent.
             alpha: PageRank damping factor.
@@ -52,13 +56,14 @@ class LogOddsBackend:
             pagerank_max_iter: Maximum PageRank iterations.
             epsilon: Small value for numerical stability.
         """
-        self.decay_rate = decay_rate
-        self.beta = beta
-        self.alpha = alpha
-        self.lambda_mode = lambda_mode
-        self.fixed_lambda = fixed_lambda
-        self.pagerank_tol = pagerank_tol
-        self.pagerank_max_iter = pagerank_max_iter
+        cfg = config or ExposureLogOddsConfig()
+        self.decay_rate = decay_rate if decay_rate is not None else cfg.decay.decay_rate
+        self.beta = beta if beta is not None else cfg.engine.beta
+        self.alpha = alpha if alpha is not None else cfg.pagerank.alpha
+        self.lambda_mode = lambda_mode if lambda_mode is not None else cfg.lambda_mode
+        self.fixed_lambda = fixed_lambda if fixed_lambda is not None else cfg.fixed_lambda
+        self.pagerank_tol = pagerank_tol if pagerank_tol is not None else cfg.pagerank.tol
+        self.pagerank_max_iter = pagerank_max_iter if pagerank_max_iter is not None else cfg.pagerank.max_iter
         self.epsilon = epsilon
 
         self.logger = get_logger(self.__class__.__name__)

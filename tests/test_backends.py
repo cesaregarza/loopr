@@ -6,6 +6,7 @@ import pytest
 
 from loopr.algorithms.backends.log_odds import LogOddsBackend
 from loopr.algorithms.backends.row_pr import RowPRBackend
+from loopr.core.config import ExposureLogOddsConfig, TickTockConfig
 from loopr.core.protocols import RatingBackend
 
 NOW = 1_700_000_000.0
@@ -135,3 +136,52 @@ class TestRowPRBackend:
         # Players 1,2 (team 100) won all → should rank highest
         assert scores[1] > scores[5]
         assert scores[2] > scores[6]
+
+
+class TestBackendConfigDefaults:
+    """Verify backends initialized without args use config defaults."""
+
+    def test_log_odds_defaults_match_config(self):
+        cfg = ExposureLogOddsConfig()
+        backend = LogOddsBackend()
+        assert backend.decay_rate == pytest.approx(cfg.decay.decay_rate)
+        assert backend.beta == cfg.engine.beta
+        assert backend.alpha == cfg.pagerank.alpha
+        assert backend.lambda_mode == cfg.lambda_mode
+        assert backend.fixed_lambda == cfg.fixed_lambda
+        assert backend.pagerank_tol == cfg.pagerank.tol
+        assert backend.pagerank_max_iter == cfg.pagerank.max_iter
+
+    def test_log_odds_explicit_config(self):
+        from loopr.core.config import DecayConfig
+
+        cfg = ExposureLogOddsConfig(decay=DecayConfig(half_life_days=180.0))
+        backend = LogOddsBackend(config=cfg)
+        assert backend.decay_rate == pytest.approx(cfg.decay.decay_rate)
+
+    def test_log_odds_keyword_overrides_config(self):
+        backend = LogOddsBackend(alpha=0.99)
+        assert backend.alpha == 0.99
+
+    def test_row_pr_defaults_match_config(self):
+        cfg = TickTockConfig()
+        backend = RowPRBackend()
+        assert backend.decay_rate == pytest.approx(cfg.decay.decay_rate)
+        assert backend.beta == cfg.engine.beta
+        assert backend.alpha == cfg.pagerank.alpha
+        assert backend.teleport_mode == cfg.teleport_mode
+        assert backend.smoothing_gamma == cfg.engine.gamma
+        assert backend.smoothing_cap_ratio == cfg.engine.cap_ratio
+        assert backend.pagerank_tol == cfg.pagerank.tol
+        assert backend.pagerank_max_iter == cfg.pagerank.max_iter
+
+    def test_row_pr_explicit_config(self):
+        from loopr.core.config import DecayConfig
+
+        cfg = TickTockConfig(decay=DecayConfig(half_life_days=180.0))
+        backend = RowPRBackend(config=cfg)
+        assert backend.decay_rate == pytest.approx(cfg.decay.decay_rate)
+
+    def test_row_pr_keyword_overrides_config(self):
+        backend = RowPRBackend(alpha=0.99)
+        assert backend.alpha == 0.99
