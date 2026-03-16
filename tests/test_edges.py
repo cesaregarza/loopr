@@ -230,6 +230,23 @@ class TestBuildExposureTriplets:
         np.testing.assert_array_equal(cols, [1])
         np.testing.assert_allclose(weights, [0.5])
 
+    def test_accepts_index_mapping_dataframe(self):
+        mdf = pl.DataFrame(
+            {
+                "winners": [[1]],
+                "losers": [[2]],
+                "share": [0.5],
+            }
+        )
+        index_mapping = pl.DataFrame({"id": [1, 2], "idx": [0, 1]})
+        rows, cols, weights = build_exposure_triplets(
+            mdf,
+            index_mapping=index_mapping,
+        )
+        np.testing.assert_array_equal(rows, [0])
+        np.testing.assert_array_equal(cols, [1])
+        np.testing.assert_allclose(weights, [0.5])
+
 
 class TestEdgesToTriplets:
     def test_basic_conversion(self):
@@ -248,3 +265,22 @@ class TestEdgesToTriplets:
         np.testing.assert_array_equal(rows, [0, 1])
         np.testing.assert_array_equal(cols, [1, 2])
         np.testing.assert_allclose(weights, [0.5, 0.3])
+
+    def test_skips_edges_with_missing_mapping(self):
+        edges = pl.DataFrame(
+            {
+                "src": [1, 2],
+                "dst": [2, 99],
+                "w": [0.5, 0.3],
+            }
+        )
+        rows, cols, weights = edges_to_triplets(
+            edges,
+            {1: 0, 2: 1},
+            "src",
+            "dst",
+            "w",
+        )
+        np.testing.assert_array_equal(rows, [0])
+        np.testing.assert_array_equal(cols, [1])
+        np.testing.assert_allclose(weights, [0.5])

@@ -24,7 +24,7 @@ from loopr.core import (
     pagerank_sparse,
 )
 from loopr.core.logging import get_logger
-from loopr.core.preparation import prepare_row_edge_inputs
+from loopr.core.preparation import group_team_members, prepare_row_edge_inputs
 from loopr.schema import prepare_rank_inputs
 
 
@@ -134,6 +134,7 @@ class RowPRBackend:
         **kwargs,
     ) -> pl.DataFrame:
         """Compute ratings from already-normalized match and player frames."""
+        roster_source = group_team_members(players)
         prepared = prepare_row_edge_inputs(
             matches,
             players,
@@ -141,6 +142,7 @@ class RowPRBackend:
             self.clock.now,
             self.decay_rate,
             self.beta,
+            rosters=roster_source,
         )
         edges = prepared.edges
 

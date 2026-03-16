@@ -23,7 +23,7 @@ from loopr.core import (
     pagerank_from_adjacency,
 )
 from loopr.core.logging import get_logger
-from loopr.core.preparation import prepare_exposure_graph
+from loopr.core.preparation import group_team_members, prepare_exposure_graph
 from loopr.schema import prepare_rank_inputs
 
 if TYPE_CHECKING:
@@ -111,6 +111,7 @@ class ExposureLogOddsEngine:
         # 2) Convert matches into compact per-match lists with roster expansion and weights
         self.logger.info("Converting matches...")
         stage_start = time.perf_counter()
+        roster_source = group_team_members(participants_df)
         graph_inputs = prepare_exposure_graph(
             matches,
             participants_df,
@@ -118,6 +119,7 @@ class ExposureLogOddsEngine:
             self.clock.now,
             self.config.decay.decay_rate,
             self.config.engine.beta,
+            rosters=roster_source,
             appearances=appearances,
             active_entities=active_entities,
         )

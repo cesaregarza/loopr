@@ -1,6 +1,7 @@
 import polars as pl
 
 from loopr.core.preparation import (
+    group_team_members,
     participants_by_tournament,
     prepare_exposure_graph,
     prepare_row_edge_inputs,
@@ -112,3 +113,28 @@ def test_prepare_row_edges_and_participants_by_tournament_use_resolved_matches(
     assert row_inputs.edges.height == 4
     assert set(row_inputs.node_ids) == {1, 2, 5, 6}
     assert participants_by_tournament(row_inputs.matches) == {999: [1, 2, 5, 6]}
+
+
+def test_prepare_row_edge_inputs_accepts_grouped_rosters(
+    single_match_neutral_tables,
+):
+    inputs = prepare_rank_inputs(
+        single_match_neutral_tables["matches"],
+        single_match_neutral_tables["participants"],
+        single_match_neutral_tables["appearances"],
+    )
+    grouped_rosters = group_team_members(inputs.participants)
+
+    row_inputs = prepare_row_edge_inputs(
+        inputs.matches,
+        inputs.participants,
+        tournament_influence={},
+        now_timestamp=NOW,
+        decay_rate=0.0,
+        beta=0.0,
+        rosters=grouped_rosters,
+        appearances=inputs.appearances,
+    )
+
+    assert row_inputs.edges.height == 4
+    assert set(row_inputs.node_ids) == {1, 2, 5, 6}

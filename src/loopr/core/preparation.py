@@ -287,6 +287,11 @@ def _group_team_members(participants: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def group_team_members(participants: pl.DataFrame) -> pl.DataFrame:
+    """Group per-team participant rows into roster lists."""
+    return _group_team_members(participants)
+
+
 def _group_match_appearances(
     appearances: pl.DataFrame | None,
     participants: pl.DataFrame,
@@ -316,6 +321,40 @@ def _group_match_appearances(
         .group_by(["tournament_id", "match_id", "team_id"])
         .agg(pl.col("user_id"))
     )
+
+
+def _is_grouped_lookup(
+    frame: pl.DataFrame | None,
+    *,
+    required_columns: set[str],
+) -> bool:
+    if frame is None or not required_columns.issubset(frame.columns):
+        return False
+    return isinstance(frame.schema.get("user_id"), pl.List)
+
+
+def _resolve_roster_source(
+    participants: pl.DataFrame,
+    rosters: pl.DataFrame | None,
+) -> pl.DataFrame:
+    if _is_grouped_lookup(
+        rosters,
+        required_columns={TOURNAMENT_ID, "team_id", "user_id"},
+    ):
+        return rosters
+    return _group_team_members(rosters if rosters is not None else participants)
+
+
+def _resolve_appearance_source(
+    appearances: pl.DataFrame | None,
+    participants: pl.DataFrame,
+) -> pl.DataFrame | None:
+    if _is_grouped_lookup(
+        appearances,
+        required_columns={TOURNAMENT_ID, MATCH_ID, "team_id", "user_id"},
+    ):
+        return appearances
+    return _group_match_appearances(appearances, participants)
 
 
 def _assign_match_rosters(
@@ -405,10 +444,8 @@ def resolve_match_participants(
             matches=_empty_resolved_matches(include_share),
         )
 
-    roster_source = _group_team_members(
-        rosters if rosters is not None else participants
-    )
-    appearance_source = _group_match_appearances(appearances, participants)
+    roster_source = _resolve_roster_source(participants, rosters)
+    appearance_source = _resolve_appearance_source(appearances, participants)
     match_data = _assign_match_rosters(
         weighted_df,
         roster_source,

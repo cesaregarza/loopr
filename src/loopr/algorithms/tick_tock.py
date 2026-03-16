@@ -23,6 +23,7 @@ from loopr.core import (
 )
 from loopr.core.logging import get_logger
 from loopr.core.preparation import (
+    group_team_members,
     participants_by_tournament,
     prepare_row_edge_inputs,
 )
@@ -86,6 +87,7 @@ class TickTockEngine:
     ) -> pl.DataFrame:
         start_time = time.time()
         players = participants
+        roster_source = group_team_members(players)
 
         # Initial S
         if initial_influence:
@@ -104,7 +106,10 @@ class TickTockEngine:
             )
 
             tick_result = self._tick(
-                matches, players, self.tournament_influence
+                matches,
+                players,
+                self.tournament_influence,
+                rosters=roster_source,
             )
             if tick_result["pagerank"].size == 0:
                 self.logger.warning("No PageRank computed; breaking.")
@@ -206,6 +211,8 @@ class TickTockEngine:
         matches: pl.DataFrame,
         players: pl.DataFrame,
         tournament_influence: dict[int, float],
+        *,
+        rosters: pl.DataFrame | None = None,
     ) -> dict:
         prepared = prepare_row_edge_inputs(
             matches,
@@ -214,6 +221,7 @@ class TickTockEngine:
             self.clock.now,
             self.config.decay.decay_rate,
             self.config.engine.beta,
+            rosters=rosters,
         )
         edges = prepared.edges
         if edges.is_empty():

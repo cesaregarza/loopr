@@ -19,6 +19,7 @@ from loopr.core.constants import (
 from loopr.core.preparation import (
     PreparedGraphInputs,
     build_team_edge_dataframe,
+    group_team_members,
     prepare_row_edge_inputs,
     prepare_weighted_matches,
 )
@@ -28,6 +29,91 @@ if TYPE_CHECKING:
     from typing import Any
 
     from loopr.core.smoothing import SmoothingStrategy
+
+
+def _empty_triplets() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        np.array([], dtype=np.int64),
+        np.array([], dtype=np.int64),
+        np.array([], dtype=np.float64),
+    )
+
+
+def _sorted_mapping_arrays(
+    *,
+    node_to_index: dict[Any, int] | None = None,
+    index_mapping: pl.DataFrame | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if node_to_index is not None:
+        valid_items = [
+            (entity_id, idx)
+            for entity_id, idx in node_to_index.items()
+            if entity_id is not None
+        ]
+        if not valid_items:
+            return (
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+            )
+        ids, indices = zip(*valid_items)
+        mapping_ids = np.asarray(ids)
+        mapping_idx = np.asarray(indices, dtype=np.int64)
+    else:
+        if index_mapping is None or index_mapping.is_empty():
+            return (
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+            )
+        mapping_ids = np.asarray(index_mapping["id"].to_numpy())
+        mapping_idx = index_mapping["idx"].to_numpy().astype(np.int64, copy=False)
+
+    order = np.argsort(mapping_ids)
+    return mapping_ids[order], mapping_idx[order]
+
+
+def _lookup_sorted(
+    lookup_ids: np.ndarray,
+    mapping_ids: np.ndarray,
+    mapping_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    if lookup_ids.size == 0 or mapping_ids.size == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=bool)
+
+    positions = np.searchsorted(mapping_ids, lookup_ids)
+    in_bounds = positions < mapping_ids.size
+    safe_positions = positions.copy()
+    safe_positions[~in_bounds] = 0
+    matched = in_bounds & (mapping_ids[safe_positions] == lookup_ids)
+
+    result = np.empty(lookup_ids.size, dtype=mapping_values.dtype)
+    if mapping_values.size:
+        result[:] = mapping_values[0]
+        result[matched] = mapping_values[safe_positions[matched]]
+    return result, matched
+
+
+def _triplets_from_joined_edges(
+    source_ids: np.ndarray,
+    target_ids: np.ndarray,
+    weights: np.ndarray,
+    *,
+    mapping_ids: np.ndarray,
+    mapping_idx: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if source_ids.size == 0 or target_ids.size == 0 or mapping_ids.size == 0:
+        return _empty_triplets()
+
+    rows, row_valid = _lookup_sorted(source_ids, mapping_ids, mapping_idx)
+    cols, col_valid = _lookup_sorted(target_ids, mapping_ids, mapping_idx)
+    valid = row_valid & col_valid
+    if not np.any(valid):
+        return _empty_triplets()
+
+    return (
+        rows[valid].astype(np.int64, copy=False),
+        cols[valid].astype(np.int64, copy=False),
+        weights[valid].astype(np.float64, copy=False),
+    )
 
 
 def build_player_edges(
@@ -62,6 +148,7 @@ def _build_player_edges_normalized(
     timestamp_column: str | None = None,
 ) -> pl.DataFrame:
     """Internal player-edge construction for already-normalized inputs."""
+    roster_source = group_team_members(players)
     prepared = prepare_row_edge_inputs(
         matches,
         players,
@@ -69,6 +156,7 @@ def _build_player_edges_normalized(
         now_timestamp,
         decay_rate,
         beta,
+        rosters=roster_source,
         timestamp_column=timestamp_column,
     )
     return prepared.edges
@@ -133,35 +221,16 @@ def build_exposure_triplets(
     if node_to_index is None:
         if index_mapping is None:
             raise ValueError("node_to_index or index_mapping is required")
-        if index_mapping.is_empty():
-            return (
-                np.array([], dtype=np.int64),
-                np.array([], dtype=np.int64),
-                np.array([], dtype=np.float64),
-            )
-        node_to_index = dict(
-            zip(index_mapping["id"].to_list(), index_mapping["idx"].to_list())
-        )
-    else:
-        node_to_index = {
-            entity_id: idx
-            for entity_id, idx in node_to_index.items()
-            if entity_id is not None
-        }
-        if not node_to_index:
-            return (
-                np.array([], dtype=np.int64),
-                np.array([], dtype=np.int64),
-                np.array([], dtype=np.float64),
-            )
+    mapping_ids, mapping_idx = _sorted_mapping_arrays(
+        node_to_index=node_to_index,
+        index_mapping=index_mapping,
+    )
+    if mapping_ids.size == 0:
+        return _empty_triplets()
 
     if pair_edges is None:
         if matches_df.is_empty():
-            return (
-                np.array([], dtype=np.int64),
-                np.array([], dtype=np.int64),
-                np.array([], dtype=np.float64),
-            )
+            return _empty_triplets()
         pair_edges = (
             matches_df.select([WINNERS, LOSERS, SHARE])
             .explode(WINNERS)
@@ -173,39 +242,15 @@ def build_exposure_triplets(
             .rename({WINNERS: "winner_id", LOSERS: "loser_id"})
         )
     elif pair_edges.is_empty():
-        return (
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.float64),
-        )
+        return _empty_triplets()
 
-    winner_ids = pair_edges["winner_id"].to_list()
-    loser_ids = pair_edges["loser_id"].to_list()
-    shares = pair_edges["share"].to_numpy()
-
-    count = 0
-    n = len(winner_ids)
-    row_buf = np.empty(n, dtype=np.int64)
-    col_buf = np.empty(n, dtype=np.int64)
-    wt_buf = np.empty(n, dtype=np.float64)
-    _get = node_to_index.get
-    for i in range(n):
-        winner_idx = _get(winner_ids[i])
-        loser_idx = _get(loser_ids[i])
-        if winner_idx is not None and loser_idx is not None:
-            row_buf[count] = winner_idx
-            col_buf[count] = loser_idx
-            wt_buf[count] = shares[i]
-            count += 1
-
-    if count == 0:
-        return (
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.float64),
-        )
-
-    return row_buf[:count], col_buf[:count], wt_buf[:count]
+    return _triplets_from_joined_edges(
+        np.asarray(pair_edges["winner_id"].to_numpy()),
+        np.asarray(pair_edges["loser_id"].to_numpy()),
+        pair_edges["share"].to_numpy().astype(np.float64, copy=False),
+        mapping_ids=mapping_ids,
+        mapping_idx=mapping_idx,
+    )
 
 
 def compute_denominators(
@@ -216,22 +261,38 @@ def compute_denominators(
     weight_column: str = WEIGHT_SUM,
 ) -> pl.DataFrame:
     """Compute denominators with smoothing for edge normalization."""
-    loss_sums: dict = {}
-    win_sums: dict = {}
-    loser_ids = edges[loser_column].to_list()
-    winner_ids = edges[winner_column].to_list()
-    weights = edges[weight_column].to_numpy()
+    if edges.is_empty():
+        return pl.DataFrame(
+            schema={
+                loser_column: edges.schema.get(loser_column, pl.Int64),
+                "loss_weights": pl.Float64,
+                "win_weights": pl.Float64,
+                "denom": pl.Float64,
+                "lambda": pl.Float64,
+            }
+        )
 
-    for i in range(len(loser_ids)):
-        weight = float(weights[i])
-        loser_id = loser_ids[i]
-        winner_id = winner_ids[i]
-        loss_sums[loser_id] = loss_sums.get(loser_id, 0.0) + weight
-        win_sums[winner_id] = win_sums.get(winner_id, 0.0) + weight
+    denominators = (
+        edges.group_by(loser_column)
+        .agg(pl.col(weight_column).sum().alias("loss_weights"))
+        .sort(loser_column)
+    )
+    win_sums = (
+        edges.group_by(winner_column)
+        .agg(pl.col(weight_column).sum().alias("win_weights"))
+        .sort(winner_column)
+    )
 
-    node_ids = sorted(loss_sums.keys())
-    loss_arr = np.array([loss_sums[node_id] for node_id in node_ids], dtype=float)
-    win_arr = np.array([win_sums.get(node_id, 0.0) for node_id in node_ids], dtype=float)
+    loss_arr = denominators["loss_weights"].to_numpy().astype(
+        np.float64, copy=False
+    )
+    denom_ids = np.asarray(denominators[loser_column].to_numpy())
+    win_ids = np.asarray(win_sums[winner_column].to_numpy())
+    win_values = win_sums["win_weights"].to_numpy().astype(np.float64, copy=False)
+    win_arr = np.zeros(denom_ids.size, dtype=np.float64)
+    if win_ids.size:
+        aligned_win, matched = _lookup_sorted(denom_ids, win_ids, win_values)
+        win_arr[matched] = aligned_win[matched]
 
     if smoothing_strategy:
         denom_arr = smoothing_strategy.denom(loss_arr, win_arr)
@@ -242,7 +303,7 @@ def compute_denominators(
 
     return pl.DataFrame(
         {
-            loser_column: node_ids,
+            loser_column: denom_ids.tolist(),
             "loss_weights": loss_arr,
             "win_weights": win_arr,
             "denom": denom_arr,
@@ -258,23 +319,33 @@ def normalize_edges(
     weight_column: str = WEIGHT_SUM,
 ) -> pl.DataFrame:
     """Normalize edge weights by denominators."""
-    denom_dict = dict(
-        zip(
-            denominators[loser_column].to_list(),
-            denominators["denom"].to_list(),
+    if edges.is_empty():
+        return edges.with_columns(
+            pl.Series(name=NORMALIZED_WEIGHT, values=[], dtype=pl.Float64),
+            pl.Series(name="denom", values=[], dtype=pl.Float64),
         )
+
+    edge_ids = np.asarray(edges[loser_column].to_numpy())
+    weights = edges[weight_column].to_numpy().astype(np.float64, copy=False)
+    denom_ids = np.asarray(denominators[loser_column].to_numpy())
+    denom_values = denominators["denom"].to_numpy().astype(np.float64, copy=False)
+
+    expanded_denoms = np.ones(edge_ids.size, dtype=np.float64)
+    if denom_ids.size:
+        mapped_denoms, matched = _lookup_sorted(edge_ids, denom_ids, denom_values)
+        expanded_denoms[matched] = mapped_denoms[matched]
+
+    normalized = np.zeros(edge_ids.size, dtype=np.float64)
+    np.divide(
+        weights,
+        expanded_denoms,
+        out=normalized,
+        where=expanded_denoms != 0.0,
     )
 
-    loser_ids = edges[loser_column].to_list()
-    weights = edges[weight_column].to_numpy()
-    normalized = np.empty(len(weights), dtype=float)
-    for i, loser_id in enumerate(loser_ids):
-        denom = denom_dict.get(loser_id, 1.0)
-        normalized[i] = weights[i] / denom if denom != 0.0 else 0.0
-
     return edges.with_columns(
+        pl.Series("denom", expanded_denoms),
         pl.Series(NORMALIZED_WEIGHT, normalized),
-        pl.Series("denom", [denom_dict.get(loser_id, 1.0) for loser_id in loser_ids]),
     )
 
 
@@ -286,23 +357,14 @@ def edges_to_triplets(
     weight_column: str = WEIGHT_SUM,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Convert edge DataFrame to COO triplets."""
-    source_ids = edges[source_column].to_list()
-    target_ids = edges[target_column].to_list()
-    weights = edges[weight_column].to_numpy()
+    mapping_ids, mapping_idx = _sorted_mapping_arrays(node_to_index=node_to_index)
+    if mapping_ids.size == 0:
+        return _empty_triplets()
 
-    n = len(source_ids)
-    row_buf = np.empty(n, dtype=np.int64)
-    col_buf = np.empty(n, dtype=np.int64)
-    wt_buf = np.empty(n, dtype=np.float64)
-    count = 0
-    _get = node_to_index.get
-    for i in range(n):
-        source_idx = _get(source_ids[i])
-        target_idx = _get(target_ids[i])
-        if source_idx is not None and target_idx is not None:
-            row_buf[count] = source_idx
-            col_buf[count] = target_idx
-            wt_buf[count] = weights[i]
-            count += 1
-
-    return row_buf[:count], col_buf[:count], wt_buf[:count]
+    return _triplets_from_joined_edges(
+        np.asarray(edges[source_column].to_numpy()),
+        np.asarray(edges[target_column].to_numpy()),
+        edges[weight_column].to_numpy().astype(np.float64, copy=False),
+        mapping_ids=mapping_ids,
+        mapping_idx=mapping_idx,
+    )

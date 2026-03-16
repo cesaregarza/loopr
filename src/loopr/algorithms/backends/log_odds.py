@@ -19,7 +19,7 @@ from loopr.core import (
     pagerank_from_adjacency,
 )
 from loopr.core.logging import get_logger
-from loopr.core.preparation import prepare_exposure_graph
+from loopr.core.preparation import group_team_members, prepare_exposure_graph
 from loopr.schema import prepare_rank_inputs
 
 
@@ -114,6 +114,7 @@ class LogOddsBackend:
         **kwargs,
     ) -> pl.DataFrame:
         """Compute ratings from already-normalized match and player frames."""
+        roster_source = group_team_members(players)
         graph_inputs = prepare_exposure_graph(
             matches,
             players,
@@ -121,6 +122,7 @@ class LogOddsBackend:
             self.clock.now,
             self.decay_rate,
             self.beta,
+            rosters=roster_source,
             active_entities=active_ids or None,
         )
         matches_df = graph_inputs.matches
