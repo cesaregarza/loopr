@@ -1,14 +1,14 @@
 # LOOPR
 
 `loopr` is a domain-agnostic ranking library for event-based competition data.
-It is built around neutral tabular inputs, supports several ranking engines, and
-includes exact leave-one-match-out impact analysis for the main log-odds engine.
+It focuses on neutral tabular inputs, entity-level rankings derived from match
+results, and exact leave-one-match-out analysis for the main log-odds engine.
 
-The recommended public API is:
+The recommended public entrypoint is:
 
+- `LOOPREngine` for the main ranking workflow
 - `rank_entities(...)` for rankings
-- `prepare_rank_inputs(...)` and the `normalize_*_schema(...)` helpers for schema adaptation
-- `LOOPREngine` for the main exposure log-odds model
+- `prepare_rank_inputs(...)` for validating and normalizing neutral input tables
 
 `LOOPREngine` is currently an alias for `ExposureLogOddsEngine`.
 
@@ -60,9 +60,24 @@ rankings = engine.rank_entities(matches, participants)
 print(rankings.select(["entity_id", "score"]).head())
 ```
 
-## Recommended Input Schema
+## Recommended Defaults
 
-`loopr` accepts neutral input tables and normalizes them internally.
+For most users, the right starting point is:
+
+- `LOOPREngine()`
+- default configuration
+- `appearances` included whenever available
+
+Treat the output as a ranking signal, not a calibrated probability-like score.
+Tune only after you have an external validation target or a clear operational
+reason. For the opinionated defaults guide, see
+[docs/defaults-and-recipes.md](docs/defaults-and-recipes.md). For the reusable
+evaluation contract, see
+[docs/validation-harness.md](docs/validation-harness.md).
+
+## Public Input Shape
+
+The main public `rank_entities(...)` path expects binary group-result inputs.
 
 ### Matches
 
@@ -96,234 +111,56 @@ Optional per-match participation data:
 - `entity_id`
 - optional `group_id`
 
-If `appearances` are provided, the engines use them to determine who actually
-played in a match. If `group_id` is missing, `loopr` infers it from the
-participants table when possible.
+If `appearances` are present, `loopr` uses them to determine who actually
+played in a match instead of assuming the full roster participated.
 
-The public API is neutral-schema-only. Inputs that use the older
-`tournament` / `team` / `user` naming are no longer accepted by the supported
+The public API is neutral-schema-only. Inputs using the older
+`tournament` / `team` / `user` naming are not part of the supported public
 surface.
 
-## Engine Overview
+## Engine Summary
 
 ### `LOOPREngine` / `ExposureLogOddsEngine`
 
-This is the main engine and the recommended default.
-
-Characteristics:
-
-- volume-neutral, exposure-based log-odds ranking
-- optional time decay
-- optional inactivity decay
-- optional tick-tock active-entity filtering
-- exact leave-one-match-out analysis support
-
-`rank_entities(...)` returns a Polars `DataFrame` sorted by rank with:
-
-- `entity_id`
-- `player_rank`
-- `score`
-- `win_pr`
-- `loss_pr`
-- `exposure`
-
-`player_rank` and `score` currently carry the same value.
+The recommended default. It is volume-neutral, exposure-based, supports time
+decay and inactivity decay, and includes exact leave-one-match-out analysis.
 
 ### `TickTockEngine`
 
-This engine iteratively estimates tournament influence and ratings in alternating
-tick/tock steps.
-
-`rank_entities(...)` returns:
-
-- `entity_id`
-- `score`
+An iterative tournament-influence engine that alternates between entity rating
+updates and tournament-strength updates.
 
 ### `TTLEngine`
 
-TTL combines tick-tock tournament influence updates with the log-odds backend.
+A hybrid flow that uses tick-tock tournament influence updates with a rating
+backend such as the log-odds backend.
 
-`rank_entities(...)` returns at least:
+## Documentation
 
-- `entity_id`
-- `score`
-- `active`
+README is the general entrypoint. The advanced docs live under `docs/`.
 
-It may also include:
+- [docs/README.md](docs/README.md): advanced docs index
+- [docs/input-patterns.md](docs/input-patterns.md): detailed schema guidance, participants, appearances, and normalization
+- [docs/result-modes.md](docs/result-modes.md): binary group results vs positional results
+- [docs/how-loopr-works.md](docs/how-loopr-works.md): deeper technical walkthrough of weighting, graph construction, and engine execution
+- [docs/engines-and-configuration.md](docs/engines-and-configuration.md): engine comparison, outputs, and configuration knobs
+- [docs/defaults-and-recipes.md](docs/defaults-and-recipes.md): recommended starting setup, conservative debugging baseline, and a minimal ablation grid
+- [docs/validation-and-benchmarks.md](docs/validation-and-benchmarks.md): how to evaluate `loopr`, structure benchmark reports, and separate runtime evidence from model-quality evidence
+- [docs/validation-harness.md](docs/validation-harness.md): the concrete contract for future reusable validation runs, reports, and benchmark artifacts
+- [docs/ablations.md](docs/ablations.md): how to compare ingredients like appearances, decay, tournament influence, and tick-tock cleanly
+- [docs/case-studies/README.md](docs/case-studies/README.md): concrete applied examples, including Sendou Plus and a Mario Kart positional-results case study
+- [docs/analysis-and-diagnostics.md](docs/analysis-and-diagnostics.md): leave-one-match-out analysis, diagnostics, and benchmarking
 
-- `win_pr`
-- `loss_pr`
-- `exposure`
-- `quality_mass`
+## Common Next Steps
 
-## Configuration
-
-The main configuration types exported by the package are:
-
-- `DecayConfig`
-- `PageRankConfig`
-- `EngineConfig`
-- `TickTockConfig`
-- `ExposureLogOddsConfig`
-
-Example:
-
-```python
-from loopr import (
-    DecayConfig,
-    EngineConfig,
-    ExposureLogOddsConfig,
-    LOOPREngine,
-    PageRankConfig,
-    TickTockConfig,
-)
-
-config = ExposureLogOddsConfig(
-    decay=DecayConfig(half_life_days=45.0),
-    pagerank=PageRankConfig(alpha=0.85, tol=1e-8, max_iter=200),
-    engine=EngineConfig(
-        beta=1.0,
-        min_exposure=2.0,
-        score_decay_delay_days=30.0,
-        score_decay_rate=0.01,
-    ),
-    tick_tock=TickTockConfig(max_ticks=5, convergence_tol=1e-4),
-    lambda_mode="auto",
-    fixed_lambda=None,
-    use_tick_tock_active=True,
-    apply_log_transform=True,
-)
-
-engine = LOOPREngine(config=config)
-```
-
-Important knobs for `LOOPREngine`:
-
-- `decay.half_life_days`: recency weighting for match importance
-- `engine.beta`: strength of tournament influence weighting
-- `engine.min_exposure`: filter low-exposure entities from final output
-- `engine.score_decay_delay_days` / `engine.score_decay_rate`: inactivity decay after ranking
-- `lambda_mode` / `fixed_lambda`: score smoothing mode
-- `use_tick_tock_active`: whether to derive active entities via tick-tock first
-
-## Working With Appearances
-
-When only a subset of a roster actually played in a match, pass an
-`appearances` table:
-
-```python
-rankings = engine.rank_entities(
-    matches,
-    participants,
-    appearances=appearances,
-)
-```
-
-This matters because the log-odds engines distribute match exposure across the
-entities that participated in the match, not just the full roster.
-
-## Schema Utilities
-
-The package exports `prepare_rank_inputs(...)` to validate neutral inputs and
-rename them into the internal engine schema:
-
-```python
-from loopr import prepare_rank_inputs
-
-prepared = prepare_rank_inputs(matches, participants, appearances)
-```
-
-`prepare_rank_inputs(...)` returns a `NormalizedRankingInputs` object with:
-
-- `matches`
-- `participants`
-- `appearances`
-
-## Leave-One-Match-Out Analysis
-
-`LOOPREngine` includes exact leave-one-match-out analysis based on low-rank
-PageRank updates.
-
-```python
-engine = LOOPREngine()
-engine.rank_entities(matches, participants, appearances=appearances)
-
-engine.prepare_loo_analyzer()
-
-impact = engine.analyze_match_impact(match_id=10, entity_id=1)
-print(impact["delta"]["score"])
-
-entity_impacts = engine.analyze_entity_matches(
-    entity_id=1,
-    limit=20,
-    include_teleport=True,
-    parallel=True,
-    max_workers=4,
-)
-print(entity_impacts.head())
-```
-
-Useful methods:
-
-- `prepare_loo_analyzer(...)`
-- `analyze_match_impact(match_id, entity_id, include_teleport=True)`
-- `analyze_entity_matches(entity_id, limit=None, include_teleport=True, parallel=True, max_workers=4)`
-- `get_loo_analyzer()`
-
-`analyze_entity_matches(...)` returns a `DataFrame` sorted by absolute impact
-with columns:
-
-- `match_id`
-- `is_win`
-- `old_score`
-- `new_score`
-- `score_delta`
-- `abs_delta`
-- `win_pr_delta`
-- `loss_pr_delta`
-
-## Diagnostics
-
-After a `LOOPREngine` run, the engine exposes:
-
-- `last_result`: an `ExposureLogOddsResult`
-- `last_stage_timings`: per-stage timing data for the most recent run
-- `tournament_influence`: the influence weights used for that run
-
-`last_result` includes arrays such as:
-
-- `scores`
-- `ids`
-- `win_pagerank`
-- `loss_pagerank`
-- `teleport`
-- `exposure`
-- `lambda_used`
-- `stage_timings`
-
-## Benchmarking
-
-A synthetic benchmark is included at:
-
-- [benchmarks/benchmark_rank_entities.py](benchmarks/benchmark_rank_entities.py)
-
-Example:
-
-```bash
-PYTHONPATH=src python benchmarks/benchmark_rank_entities.py \
-  --events 40 \
-  --teams-per-event 32 \
-  --matches-per-event 160 \
-  --roster-size 4 \
-  --repeats 3
-```
-
-The script prints JSON with:
-
-- workload size
-- row counts
-- min/mean/max runtime
-- mean per-stage timings from `LOOPREngine.last_stage_timings`
+- Use `prepare_rank_inputs(...)` when you want schema validation or normalized
+  internal column names before calling lower-level helpers.
+- Pass `appearances` when match-level participation differs from the stored
+  roster.
+- Start with the default config and validate before tuning; see
+  [docs/defaults-and-recipes.md](docs/defaults-and-recipes.md).
+- Treat positional-result handling as an advanced/helper-level feature for now;
+  see [docs/result-modes.md](docs/result-modes.md).
 
 ## Development
 
