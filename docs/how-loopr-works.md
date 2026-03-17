@@ -14,7 +14,7 @@ advanced docs index, use [README.md](README.md).
 At a high level, `loopr` does four things:
 
 1. Normalize neutral input tables into the internal schema
-2. Turn match or result rows into entity-level winner/loser relationships
+2. Turn binary group-result rows into entity-level winner/loser relationships
 3. Build graph artifacts from those relationships
 4. Run one of the ranking engines on the resulting graph
 
@@ -52,10 +52,9 @@ rows into resolved entity-level winner/loser lists with per-result weights.
 
 ### 2A. Attach Timestamps And Base Weights
 
-`prepare_weighted_matches(...)` and `prepare_weighted_positional_results(...)`
-do the first weighting pass.
+`prepare_weighted_matches(...)` does the first weighting pass.
 
-They:
+It:
 
 - filter out rows that cannot produce competitive outcomes
 - filter byes / walkovers when `walkover` or `is_bye` is present
@@ -98,34 +97,7 @@ When share-aware graph prep is requested, it also includes:
 That `share` is the per winner-loser pair mass used by the exposure-style
 engines.
 
-### 2C. Positional Expansion
-
-Positional data follows a different preparation path.
-
-Input shape:
-
-- one row per finisher
-- `event_id`
-- `match_id`
-- `placement`
-- exactly one of `entity_id` or `group_id`
-
-Internally, positional rows are first weighted the same general way as binary
-rows. Then they are resolved to entity membership:
-
-- direct singleton entity membership for `entity_id`
-- roster or appearance-based entity membership for `group_id`
-
-After that, `loopr` expands placements into implied comparisons:
-
-- every better placement beats every worse placement
-- equal placements create bidirectional peer edges
-- self-edges are skipped
-
-This produces the same resolved `winners` / `losers` shape used by the rest of
-the system, which is why downstream code can stay mostly mode-agnostic.
-
-### 2D. Two Different Edge Masses Exist
+### 2C. Two Different Edge Masses Exist
 
 This is easy to miss and explains a lot of later behavior.
 
@@ -373,7 +345,6 @@ If you want the shortest deep mental model, it is this:
 ## Related Reading
 
 - [input-patterns.md](input-patterns.md) for the public input boundary
-- [result-modes.md](result-modes.md) for binary vs positional semantics
 - [engines-and-configuration.md](engines-and-configuration.md) for engine
   selection and tuning
 - [analysis-and-diagnostics.md](analysis-and-diagnostics.md) for the public

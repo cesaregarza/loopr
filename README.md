@@ -141,14 +141,13 @@ README is the general entrypoint. The advanced docs live under `docs/`.
 
 - [docs/README.md](docs/README.md): advanced docs index
 - [docs/input-patterns.md](docs/input-patterns.md): detailed schema guidance, participants, appearances, and normalization
-- [docs/result-modes.md](docs/result-modes.md): binary group results vs positional results
 - [docs/how-loopr-works.md](docs/how-loopr-works.md): deeper technical walkthrough of weighting, graph construction, and engine execution
 - [docs/engines-and-configuration.md](docs/engines-and-configuration.md): engine comparison, outputs, and configuration knobs
 - [docs/defaults-and-recipes.md](docs/defaults-and-recipes.md): recommended starting setup, conservative debugging baseline, and a minimal ablation grid
 - [docs/validation-and-benchmarks.md](docs/validation-and-benchmarks.md): how to evaluate `loopr`, structure benchmark reports, and separate runtime evidence from model-quality evidence
 - [docs/validation-harness.md](docs/validation-harness.md): the concrete contract for future reusable validation runs, reports, and benchmark artifacts
 - [docs/ablations.md](docs/ablations.md): how to compare ingredients like appearances, decay, tournament influence, and tick-tock cleanly
-- [docs/case-studies/README.md](docs/case-studies/README.md): concrete applied examples, including Sendou Plus and a Mario Kart positional-results case study
+- [docs/case-studies/README.md](docs/case-studies/README.md): concrete applied examples, including the Sendou Plus validation case study
 - [docs/analysis-and-diagnostics.md](docs/analysis-and-diagnostics.md): leave-one-match-out analysis, diagnostics, and benchmarking
 
 ## Common Next Steps
@@ -159,8 +158,6 @@ README is the general entrypoint. The advanced docs live under `docs/`.
   roster.
 - Start with the default config and validate before tuning; see
   [docs/defaults-and-recipes.md](docs/defaults-and-recipes.md).
-- Treat positional-result handling as an advanced/helper-level feature for now;
-  see [docs/result-modes.md](docs/result-modes.md).
 
 ## Development
 

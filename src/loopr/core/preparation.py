@@ -12,7 +12,6 @@ from loopr.core.constants import (
     LOSER_USER_ID,
     MATCH_ID,
     NORMALIZED_WEIGHT,
-    PLACEMENT,
     SECONDS_PER_DAY,
     SHARE,
     TOURNAMENT_ID,
@@ -197,26 +196,6 @@ def merged_node_ids(
     return sorted(merged)
 
 
-def _validate_result_mode(result_mode: str) -> str:
-    if result_mode not in {"teams", "positional"}:
-        raise ValueError(
-            "result_mode must be one of: teams, positional"
-        )
-    return result_mode
-
-
-def _validate_positional_weight_mode(positional_weight_mode: str) -> str:
-    if positional_weight_mode not in {
-        "pairwise_full",
-        "pairwise_average",
-    }:
-        raise ValueError(
-            "positional_weight_mode must be one of: "
-            "pairwise_full, pairwise_average"
-        )
-    return positional_weight_mode
-
-
 def _attach_weight_columns(
     match_data: pl.DataFrame,
     tournament_influence: dict[int, float],
@@ -309,94 +288,6 @@ def prepare_weighted_matches(
         timestamp_column=timestamp_column,
     )
     return WeightedMatches(match_data)
-
-
-def prepare_weighted_positional_results(
-    results: pl.DataFrame,
-    tournament_influence: dict[int, float],
-    now_timestamp: float,
-    decay_rate: float,
-    beta: float,
-    *,
-    timestamp_column: str | None = None,
-) -> WeightedMatches:
-    """Filter positional result rows and attach timestamps and weights."""
-    identity_columns = [
-        column
-        for column in ("user_id", "team_id")
-        if column in results.columns
-    ]
-    if not identity_columns:
-        raise ValueError(
-            "positional results must include either user_id or team_id"
-        )
-
-    filter_expression = pl.any_horizontal(
-        [pl.col(column).is_not_null() for column in identity_columns]
-    )
-    if "is_bye" in results.columns:
-        filter_expression = filter_expression & ~pl.col("is_bye").fill_null(
-            False
-        )
-
-    result_rows = results.filter(filter_expression)
-    if result_rows.is_empty():
-        return WeightedMatches(result_rows)
-
-    counts = (
-        result_rows.group_by([TOURNAMENT_ID, MATCH_ID])
-        .len()
-        .rename({"len": "finisher_count"})
-    )
-    invalid = counts.filter(pl.col("finisher_count") < 2)
-    if invalid.height:
-        raise ValueError(
-            "positional results must contain at least two finishers per result set "
-            "after filtering"
-        )
-
-    timestamp_counts = (
-        result_rows.group_by([TOURNAMENT_ID, MATCH_ID])
-        .agg(pl.col("placement").count().alias("row_count"))
-        .join(
-            result_rows.group_by([TOURNAMENT_ID, MATCH_ID]).agg(
-                pl.col("last_game_finished_at")
-                .cast(pl.Float64, strict=False)
-                .drop_nulls()
-                .n_unique()
-                .alias("finished_at_unique")
-                if "last_game_finished_at" in result_rows.columns
-                else pl.lit(0).alias("finished_at_unique"),
-                pl.col("match_created_at")
-                .cast(pl.Float64, strict=False)
-                .drop_nulls()
-                .n_unique()
-                .alias("created_at_unique")
-                if "match_created_at" in result_rows.columns
-                else pl.lit(0).alias("created_at_unique"),
-            ),
-            on=[TOURNAMENT_ID, MATCH_ID],
-            how="left",
-        )
-    )
-    inconsistent = timestamp_counts.filter(
-        (pl.col("finished_at_unique") > 1)
-        | (pl.col("created_at_unique") > 1)
-    )
-    if inconsistent.height:
-        raise ValueError(
-            "positional results must use a consistent timestamp per result set"
-        )
-
-    result_rows = _attach_weight_columns(
-        result_rows,
-        tournament_influence,
-        now_timestamp,
-        decay_rate,
-        beta,
-        timestamp_column=timestamp_column,
-    )
-    return WeightedMatches(result_rows)
 
 
 def _group_team_members(participants: pl.DataFrame) -> pl.DataFrame:
@@ -551,90 +442,6 @@ def _assign_match_rosters(
     )
 
 
-def _resolve_positional_identity_column(results_df: pl.DataFrame) -> str:
-    identity_columns = [
-        column
-        for column in ("user_id", "team_id")
-        if column in results_df.columns
-        and results_df.select(pl.col(column).is_not_null().sum()).item() > 0
-    ]
-    if len(identity_columns) != 1:
-        raise ValueError(
-            "positional results must use exactly one of user_id or team_id"
-        )
-    return identity_columns[0]
-
-
-def _assign_positional_members(
-    weighted_results: pl.DataFrame,
-    participants: pl.DataFrame | None,
-    rosters: pl.DataFrame | None,
-    appearances: pl.DataFrame | None,
-) -> pl.DataFrame:
-    identity_column = _resolve_positional_identity_column(weighted_results)
-    if identity_column == "user_id":
-        return weighted_results.select(
-            [
-                MATCH_ID,
-                TOURNAMENT_ID,
-                PLACEMENT,
-                pl.col("user_id").alias("finisher_id"),
-                pl.concat_list(pl.col("user_id")).alias("members"),
-                WEIGHT,
-                "ts",
-            ]
-        )
-
-    if participants is None:
-        raise ValueError(
-            "participants are required for positional results using group_id"
-        )
-
-    roster_source = _resolve_roster_source(participants, rosters)
-    appearance_source = _resolve_appearance_source(appearances, participants)
-    grouped = weighted_results.join(
-        roster_source.rename({"user_id": "roster"}),
-        on=[TOURNAMENT_ID, "team_id"],
-        how="left",
-    )
-
-    if appearance_source is not None:
-        grouped = grouped.join(
-            appearance_source.rename({"user_id": "appearance"}),
-            on=[TOURNAMENT_ID, MATCH_ID, "team_id"],
-            how="left",
-        )
-        members_expr = (
-            pl.when(pl.col("appearance").is_not_null())
-            .then(pl.col("appearance"))
-            .otherwise(pl.col("roster"))
-            .alias("members")
-        )
-    else:
-        members_expr = pl.col("roster").alias("members")
-
-    return (
-        grouped.with_columns(
-            [pl.col("team_id").alias("finisher_id"), members_expr]
-        )
-        .select(
-            [
-                MATCH_ID,
-                TOURNAMENT_ID,
-                PLACEMENT,
-                "finisher_id",
-                "members",
-                WEIGHT,
-                "ts",
-            ]
-        )
-        .filter(
-            pl.col("members").is_not_null()
-            & (pl.col("members").list.len() > 0)
-        )
-    )
-
-
 def _finalize_resolved_match_rows(
     match_data: pl.DataFrame,
     *,
@@ -664,69 +471,6 @@ def _finalize_resolved_match_rows(
     if include_share:
         final_columns.extend(["winner_count", "loser_count", SHARE])
     return match_data.select(final_columns)
-
-
-def _expand_positional_match_rows(
-    positional_rows: pl.DataFrame,
-    *,
-    positional_weight_mode: str,
-) -> pl.DataFrame:
-    expanded_rows: list[dict[str, Any]] = []
-    partitions = positional_rows.sort(
-        [TOURNAMENT_ID, MATCH_ID, PLACEMENT, "finisher_id"]
-    ).partition_by([TOURNAMENT_ID, MATCH_ID], maintain_order=True)
-
-    for result_set in partitions:
-        if result_set.height < 2:
-            raise ValueError(
-                "positional results must contain at least two resolved finishers per result set"
-            )
-
-        placements = result_set[PLACEMENT].to_list()
-        finisher_ids = result_set["finisher_id"].to_list()
-        members = result_set["members"].to_list()
-        tournament_id = int(result_set[TOURNAMENT_ID][0])
-        match_id = int(result_set[MATCH_ID][0])
-        ts = float(result_set["ts"][0])
-        base_weight = float(result_set[WEIGHT][0])
-
-        comparisons: list[tuple[int, int]] = []
-        for i in range(result_set.height):
-            for j in range(i + 1, result_set.height):
-                if placements[i] < placements[j]:
-                    comparisons.append((i, j))
-                elif placements[i] == placements[j]:
-                    comparisons.append((i, j))
-                    comparisons.append((j, i))
-
-        if not comparisons:
-            raise ValueError(
-                "positional results must imply at least one comparison per result set"
-            )
-
-        if positional_weight_mode == "pairwise_average":
-            resolved_weight = base_weight / len(comparisons)
-        else:
-            resolved_weight = base_weight
-
-        for winner_idx, loser_idx in comparisons:
-            if finisher_ids[winner_idx] == finisher_ids[loser_idx]:
-                continue
-            expanded_rows.append(
-                {
-                    MATCH_ID: match_id,
-                    TOURNAMENT_ID: tournament_id,
-                    WINNERS: members[winner_idx],
-                    LOSERS: members[loser_idx],
-                    WEIGHT: resolved_weight,
-                    "ts": ts,
-                }
-            )
-
-    if not expanded_rows:
-        return _empty_resolved_matches(include_share=False)
-
-    return pl.DataFrame(expanded_rows)
 
 
 def resolve_match_participants(
@@ -768,71 +512,6 @@ def resolve_match_participants(
         weighted_matches=weighted_df,
         matches=_finalize_resolved_match_rows(
             match_data,
-            include_share=include_share,
-        ),
-    )
-
-
-def resolve_positional_results(
-    weighted_results: WeightedMatches | pl.DataFrame,
-    participants: pl.DataFrame | None = None,
-    *,
-    rosters: pl.DataFrame | None = None,
-    appearances: pl.DataFrame | None = None,
-    include_share: bool = True,
-    positional_weight_mode: str = "pairwise_full",
-) -> ResolvedMatches:
-    """Resolve ordered finishes into implied loser->winner rows."""
-    _validate_positional_weight_mode(positional_weight_mode)
-
-    weighted_df = (
-        weighted_results.matches
-        if isinstance(weighted_results, WeightedMatches)
-        else weighted_results
-    )
-    if weighted_df.is_empty():
-        return ResolvedMatches(
-            weighted_matches=weighted_df,
-            matches=_empty_resolved_matches(include_share),
-        )
-
-    positional_rows = _assign_positional_members(
-        weighted_df,
-        participants,
-        rosters,
-        appearances,
-    )
-    if positional_rows.is_empty():
-        return ResolvedMatches(
-            weighted_matches=weighted_df,
-            matches=_empty_resolved_matches(include_share),
-        )
-
-    counts = (
-        positional_rows.group_by([TOURNAMENT_ID, MATCH_ID])
-        .len()
-        .rename({"len": "finisher_count"})
-    )
-    invalid = counts.filter(pl.col("finisher_count") < 2)
-    if invalid.height:
-        raise ValueError(
-            "positional results must contain at least two resolved finishers per result set"
-        )
-
-    expanded = _expand_positional_match_rows(
-        positional_rows,
-        positional_weight_mode=positional_weight_mode,
-    )
-    if expanded.is_empty():
-        return ResolvedMatches(
-            weighted_matches=weighted_df,
-            matches=_empty_resolved_matches(include_share),
-        )
-
-    return ResolvedMatches(
-        weighted_matches=weighted_df,
-        matches=_finalize_resolved_match_rows(
-            expanded,
             include_share=include_share,
         ),
     )
@@ -984,7 +663,7 @@ def participants_by_tournament(matches_df: pl.DataFrame) -> dict[int, list[int]]
 
 def prepare_exposure_graph(
     matches: pl.DataFrame,
-    participants: pl.DataFrame | None,
+    participants: pl.DataFrame,
     tournament_influence: dict[int, float],
     now_timestamp: float,
     decay_rate: float,
@@ -993,42 +672,22 @@ def prepare_exposure_graph(
     rosters: pl.DataFrame | None = None,
     appearances: pl.DataFrame | None = None,
     active_entities: list[int] | None = None,
-    result_mode: str = "teams",
-    positional_weight_mode: str = "pairwise_full",
 ) -> PreparedGraphInputs:
     """Convenience wrapper for the full exposure-graph prep pipeline."""
-    result_mode = _validate_result_mode(result_mode)
-    if result_mode == "positional":
-        weighted = prepare_weighted_positional_results(
-            matches,
-            tournament_influence,
-            now_timestamp,
-            decay_rate,
-            beta,
-        )
-        resolved = resolve_positional_results(
-            weighted,
-            participants,
-            rosters=rosters,
-            appearances=appearances,
-            include_share=True,
-            positional_weight_mode=positional_weight_mode,
-        )
-    else:
-        weighted = prepare_weighted_matches(
-            matches,
-            tournament_influence,
-            now_timestamp,
-            decay_rate,
-            beta,
-        )
-        resolved = resolve_match_participants(
-            weighted,
-            participants,
-            rosters=rosters,
-            appearances=appearances,
-            include_share=True,
-        )
+    weighted = prepare_weighted_matches(
+        matches,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+    )
+    resolved = resolve_match_participants(
+        weighted,
+        participants,
+        rosters=rosters,
+        appearances=appearances,
+        include_share=True,
+    )
     return prepare_graph_inputs(
         resolved,
         active_entities=active_entities,
@@ -1037,7 +696,7 @@ def prepare_exposure_graph(
 
 def prepare_row_edge_inputs(
     matches: pl.DataFrame,
-    participants: pl.DataFrame | None,
+    participants: pl.DataFrame,
     tournament_influence: dict[int, float],
     now_timestamp: float,
     decay_rate: float,
@@ -1046,42 +705,21 @@ def prepare_row_edge_inputs(
     rosters: pl.DataFrame | None = None,
     appearances: pl.DataFrame | None = None,
     timestamp_column: str | None = None,
-    result_mode: str = "teams",
-    positional_weight_mode: str = "pairwise_full",
 ) -> PreparedRowEdges:
     """Convenience wrapper for the full row-edge preparation pipeline."""
-    result_mode = _validate_result_mode(result_mode)
-    if result_mode == "positional":
-        weighted = prepare_weighted_positional_results(
-            matches,
-            tournament_influence,
-            now_timestamp,
-            decay_rate,
-            beta,
-            timestamp_column=timestamp_column,
-        )
-        resolved = resolve_positional_results(
-            weighted,
-            participants,
-            rosters=rosters,
-            appearances=appearances,
-            include_share=False,
-            positional_weight_mode=positional_weight_mode,
-        )
-    else:
-        weighted = prepare_weighted_matches(
-            matches,
-            tournament_influence,
-            now_timestamp,
-            decay_rate,
-            beta,
-            timestamp_column=timestamp_column,
-        )
-        resolved = resolve_match_participants(
-            weighted,
-            participants,
-            rosters=rosters,
-            appearances=appearances,
-            include_share=False,
-        )
+    weighted = prepare_weighted_matches(
+        matches,
+        tournament_influence,
+        now_timestamp,
+        decay_rate,
+        beta,
+        timestamp_column=timestamp_column,
+    )
+    resolved = resolve_match_participants(
+        weighted,
+        participants,
+        rosters=rosters,
+        appearances=appearances,
+        include_share=False,
+    )
     return prepare_row_edges(resolved)

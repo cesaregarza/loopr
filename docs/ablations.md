@@ -30,7 +30,6 @@ For `loopr`, the main ingredient families are:
 
 - roster fallback only
 - `appearances`-aware resolution
-- binary group results vs positional-result expansion
 
 ### Weighting
 
@@ -185,7 +184,6 @@ What it does ship that makes ablations easier:
 - configurable decay
 - configurable tournament influence weighting
 - optional tick-tock active-set logic
-- positional vs binary result preparation at helper level
 - synthetic throughput benchmarking
 - detailed runtime diagnostics
 

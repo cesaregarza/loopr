@@ -131,7 +131,5 @@ those names still exist internally after normalization.
 
 ## Related Reading
 
-- [result-modes.md](result-modes.md) for binary group results vs positional
-  results
 - [engines-and-configuration.md](engines-and-configuration.md) for engine
   selection and config knobs

@@ -4,7 +4,7 @@ The repository `README.md` is the general entrypoint for `loopr`.
 
 This `docs/` directory is the deeper reference for users who already
 understand the main public ranking path and want more detail about input
-patterns, advanced result handling, engine behavior, and analysis features.
+patterns, engine behavior, and analysis features.
 
 ## Guide
 
@@ -12,10 +12,6 @@ patterns, advanced result handling, engine behavior, and analysis features.
   - detailed schema guidance for `matches`, `participants`, and `appearances`
   - when to use `prepare_rank_inputs(...)`
   - how roster-level and appearance-level participation differ
-- [result-modes.md](result-modes.md)
-  - binary group results vs positional results
-  - positional semantics, tie handling, and weighting modes
-  - current helper-level scope for positional inputs
 - [how-loopr-works.md](how-loopr-works.md)
   - deeper technical walk-through of normalization, weighting, graph prep, and engine execution
   - explains `weight` vs `share`, pair edges vs row edges, and how the engines diverge
@@ -51,6 +47,3 @@ The main documented public flow remains:
 1. Build neutral-schema `matches` and `participants`
 2. Optionally add `appearances`
 3. Call `rank_entities(...)` on `LOOPREngine`
-
-Advanced/helper-level topics such as positional-result expansion live in the
-docs pages above rather than the main README.

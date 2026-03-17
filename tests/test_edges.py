@@ -112,63 +112,6 @@ class TestBuildPlayerEdges:
         )
         assert edges.is_empty()
 
-    def test_positional_entity_results_build_all_implied_edges(self):
-        edges = build_player_edges(
-            pl.DataFrame(
-                {
-                    "event_id": [1, 1, 1, 1],
-                    "match_id": [10, 10, 10, 10],
-                    "entity_id": [1, 2, 3, 4],
-                    "placement": [1, 2, 3, 4],
-                    "completed_at": [NOW, NOW, NOW, NOW],
-                }
-            ),
-            None,
-            tournament_influence={},
-            now_timestamp=NOW,
-            decay_rate=0.0,
-            result_mode="positional",
-        )
-
-        assert {
-            tuple(row)
-            for row in edges.select(
-                ["loser_user_id", "winner_user_id"]
-            ).iter_rows()
-        } == {
-            (2, 1),
-            (3, 1),
-            (4, 1),
-            (3, 2),
-            (4, 2),
-            (4, 3),
-        }
-
-    def test_positional_ties_create_bidirectional_edges(self):
-        edges = build_player_edges(
-            pl.DataFrame(
-                {
-                    "event_id": [1, 1, 1],
-                    "match_id": [10, 10, 10],
-                    "entity_id": [10, 20, 30],
-                    "placement": [1, 1, 2],
-                    "completed_at": [NOW, NOW, NOW],
-                }
-            ),
-            None,
-            tournament_influence={},
-            now_timestamp=NOW,
-            decay_rate=0.0,
-            result_mode="positional",
-        )
-
-        assert {
-            tuple(row)
-            for row in edges.select(
-                ["loser_user_id", "winner_user_id"]
-            ).iter_rows()
-        } == {(10, 20), (20, 10), (30, 10), (30, 20)}
-
 
 class TestBuildTeamEdges:
     def test_produces_team_edges(self, basic_matches):

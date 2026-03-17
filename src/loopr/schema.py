@@ -27,15 +27,6 @@ _APPEARANCE_RENAMES = {
     "entity_id": "user_id",
 }
 
-_POSITIONAL_RESULT_RENAMES = {
-    "event_id": "tournament_id",
-    "group_id": "team_id",
-    "entity_id": "user_id",
-    "completed_at": "last_game_finished_at",
-    "created_at": "match_created_at",
-    "walkover": "is_bye",
-}
-
 
 @dataclass(frozen=True)
 class NormalizedRankingInputs:
@@ -103,62 +94,6 @@ def prepare_appearances_frame(
         "appearances",
     )
     return _rename_for_internal_use(appearances, _APPEARANCE_RENAMES)
-
-
-def prepare_positional_results_frame(results: pl.DataFrame) -> pl.DataFrame:
-    """Validate neutral positional results and rename them for internal use."""
-    _require_columns(
-        results,
-        ("event_id", "match_id", "placement"),
-        "positional_results",
-    )
-    if "group_id" not in results.columns and "entity_id" not in results.columns:
-        raise ValueError(
-            "positional_results must include either group_id or entity_id"
-        )
-
-    prepared = _rename_for_internal_use(results, _POSITIONAL_RESULT_RENAMES)
-
-    identity_columns = []
-    for column in ("team_id", "user_id"):
-        if column not in prepared.columns:
-            continue
-        if prepared.select(pl.col(column).is_not_null().sum()).item() > 0:
-            identity_columns.append(column)
-
-    if not identity_columns:
-        raise ValueError(
-            "positional_results must include non-null values for one of "
-            "group_id or entity_id"
-        )
-    if len(identity_columns) > 1:
-        raise ValueError(
-            "positional_results must use exactly one identity type: "
-            "group_id or entity_id"
-        )
-
-    identity_column = identity_columns[0]
-    null_id_rows = prepared.filter(pl.col(identity_column).is_null())
-    if null_id_rows.height:
-        raise ValueError(
-            f"positional_results contains null values in {identity_column}"
-        )
-
-    null_placement_rows = prepared.filter(pl.col("placement").is_null())
-    if null_placement_rows.height:
-        raise ValueError("positional_results contains null placements")
-
-    duplicates = (
-        prepared.group_by(["tournament_id", "match_id", identity_column])
-        .len()
-        .filter(pl.col("len") > 1)
-    )
-    if duplicates.height:
-        raise ValueError(
-            "positional_results contains duplicate finisher identities within a result set"
-        )
-
-    return prepared
 
 
 def prepare_rank_inputs(

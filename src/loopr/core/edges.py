@@ -25,8 +25,6 @@ from loopr.core.preparation import (
 )
 from loopr.schema import (
     prepare_matches_frame,
-    prepare_participants_frame,
-    prepare_positional_results_frame,
     prepare_rank_inputs,
 )
 
@@ -129,23 +127,11 @@ def build_player_edges(
     decay_rate: float,
     beta: float = 0.0,
     timestamp_column: str | None = None,
-    *,
-    result_mode: str = "teams",
-    positional_weight_mode: str = "pairwise_full",
 ) -> pl.DataFrame:
     """Build entity-level loser->winner edges with tournament weighting."""
-    if result_mode == "positional":
-        prepared_matches = prepare_positional_results_frame(matches)
-        prepared_players = (
-            prepare_participants_frame(players)
-            if players is not None
-            and {"event_id", "group_id", "entity_id"}.issubset(players.columns)
-            else players
-        )
-    else:
-        prepared = prepare_rank_inputs(matches, players)
-        prepared_matches = prepared.matches
-        prepared_players = prepared.participants
+    prepared = prepare_rank_inputs(matches, players)
+    prepared_matches = prepared.matches
+    prepared_players = prepared.participants
     return _build_player_edges_normalized(
         prepared_matches,
         prepared_players,
@@ -154,8 +140,6 @@ def build_player_edges(
         decay_rate,
         beta,
         timestamp_column=timestamp_column,
-        result_mode=result_mode,
-        positional_weight_mode=positional_weight_mode,
     )
 
 
@@ -167,9 +151,6 @@ def _build_player_edges_normalized(
     decay_rate: float,
     beta: float = 0.0,
     timestamp_column: str | None = None,
-    *,
-    result_mode: str = "teams",
-    positional_weight_mode: str = "pairwise_full",
 ) -> pl.DataFrame:
     """Internal player-edge construction for already-normalized inputs."""
     roster_source = None
@@ -187,8 +168,6 @@ def _build_player_edges_normalized(
         beta,
         rosters=roster_source,
         timestamp_column=timestamp_column,
-        result_mode=result_mode,
-        positional_weight_mode=positional_weight_mode,
     )
     return prepared.edges
 

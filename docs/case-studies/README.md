@@ -23,10 +23,6 @@ That keeps them closer to evidence reports than to product tutorials.
   - outcomes-only `loopr` rankings vs Sendou Plus peer voting
   - compares LOOPR against OpenSkill and simple activity baselines
   - includes a compact ablation snapshot from the originating project
-- [mario-kart-lounge.md](mario-kart-lounge.md)
-  - positional-result case study on real MK8DX Lounge mogi tables
-  - shows conversion from ordered finishes into `loopr` graph inputs
-  - compares `pairwise_average` against `pairwise_full` on a tied/team-heavy dataset
 
 ## Related Reading
 
