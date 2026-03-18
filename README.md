@@ -17,6 +17,18 @@ The stable public API is:
 
 ## Installation
 
+PyPI distribution name:
+
+```bash
+pip install loopr-ranking
+```
+
+Import path remains:
+
+```python
+import loopr
+```
+
 For local development:
 
 ```bash
@@ -31,6 +43,23 @@ uv sync --extra dev
 ```
 
 Requires Python 3.10+.
+
+## Docker Build
+
+The wheel and sdist release path is also available through the multi-stage
+[`Dockerfile`](Dockerfile).
+
+Run tests and quickstart smoke inside Docker:
+
+```bash
+docker build --target test .
+```
+
+Build distributable artifacts into a local directory:
+
+```bash
+docker buildx build --target artifacts --output type=local,dest=dist .
+```
 
 ## Quick Start
 
