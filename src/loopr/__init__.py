@@ -1,5 +1,6 @@
 """Standalone domain-agnostic LOOPR ranking library."""
 
+from loopr.api import rank_entities
 from loopr.algorithms import (
     ExposureLogOddsEngine,
     LOOPREngine,
@@ -40,6 +41,7 @@ __all__ = [
     "TickTockResult",
     "convert_matches_dataframe",
     "prepare_rank_inputs",
+    "rank_entities",
 ]
 
 __version__ = "0.1.0"

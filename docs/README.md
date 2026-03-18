@@ -46,4 +46,5 @@ The main documented public flow remains:
 
 1. Build neutral-schema `matches` and `participants`
 2. Optionally add `appearances`
-3. Call `rank_entities(...)` on `LOOPREngine`
+3. Call top-level `rank_entities(...)`
+4. Drop down to `LOOPREngine` only when you need diagnostics or analysis state

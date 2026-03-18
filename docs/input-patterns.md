@@ -1,7 +1,7 @@
 # Input Patterns
 
-This page expands on the neutral input shape used by the public `rank_entities`
-flow and the schema-prep utilities around it.
+This page expands on the neutral input shape used by the public
+`rank_entities(...)` flow and the schema-prep utilities around it.
 
 For the high-level overview, start in the repository
 [README.md](../README.md).
@@ -10,12 +10,16 @@ For the high-level overview, start in the repository
 
 The recommended public path uses:
 
+- top-level `rank_entities(...)`
 - `matches`: binary group results
 - `participants`: entity membership for each group
 - optional `appearances`: match-level participation overrides
 
 This means `winner_id` and `loser_id` in a match row identify groups, while the
 final ranking output still targets entities.
+
+Use `LOOPREngine` directly only when you want post-run diagnostics, stage
+timings, or leave-one-match-out analysis.
 
 ## Matches
 

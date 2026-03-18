@@ -1,14 +1,17 @@
 # LOOPR
 
 `loopr` is a domain-agnostic ranking library for event-based competition data.
-It focuses on neutral tabular inputs, entity-level rankings derived from match
-results, and exact leave-one-match-out analysis for the main log-odds engine.
+It is built for the common real-world case where outcomes are recorded for
+groups or teams, but the thing you actually want to rank is individuals. Give
+it event results plus who belonged to or appeared for each group, and it
+decomposes that team-shaped evidence into entity-level rankings.
 
-The recommended public entrypoint is:
+The stable public API is:
 
-- `LOOPREngine` for the main ranking workflow
-- `rank_entities(...)` for rankings
-- `prepare_rank_inputs(...)` for validating and normalizing neutral input tables
+- `rank_entities(...)` for the one-shot ranking path
+- `prepare_rank_inputs(...)` for validating neutral input tables
+- `LOOPREngine` when you want engine state, diagnostics, or LOO analysis
+- `ExposureLogOddsConfig` when you need to override defaults
 
 `LOOPREngine` is currently an alias for `ExposureLogOddsEngine`.
 
@@ -34,37 +37,59 @@ Requires Python 3.10+.
 ```python
 import polars as pl
 
-from loopr import LOOPREngine
+from loopr import rank_entities
 
-matches = pl.DataFrame(
-    {
-        "event_id": [1],
-        "match_id": [10],
-        "winner_id": [100],
-        "loser_id": [200],
-        "completed_at": [1_700_000_000],
-    }
+matches = pl.read_csv("matches.csv")
+participants = pl.read_csv("participants.csv")
+appearances = pl.read_csv("appearances.csv")
+
+rankings = rank_entities(
+    matches,
+    participants,
+    appearances=appearances,
 )
 
-participants = pl.DataFrame(
-    {
-        "event_id": [1] * 8,
-        "group_id": [100] * 4 + [200] * 4,
-        "entity_id": [1, 2, 3, 4, 5, 6, 7, 8],
-    }
-)
-
-engine = LOOPREngine()
-rankings = engine.rank_entities(matches, participants)
-
-print(rankings.select(["entity_id", "score"]).head())
+print(rankings.select(["entity_id", "score", "exposure"]).head(10))
 ```
+
+If your spreadsheets look like this, you are on the happy path.
+
+`matches.csv`
+
+| event_id | match_id | winner_id | loser_id | completed_at |
+| --- | --- | --- | --- | --- |
+| 1 | 10 | 100 | 200 | 1700000000 |
+| 1 | 11 | 100 | 300 | 1700003600 |
+| 1 | 12 | 300 | 200 | 1700007200 |
+
+`participants.csv`
+
+| event_id | group_id | entity_id |
+| --- | --- | --- |
+| 1 | 100 | 1 |
+| 1 | 100 | 2 |
+| 1 | 200 | 3 |
+| 1 | 200 | 4 |
+| 1 | 300 | 5 |
+| 1 | 300 | 6 |
+
+`appearances.csv` (optional)
+
+| event_id | match_id | entity_id | group_id |
+| --- | --- | --- | --- |
+| 1 | 10 | 1 | 100 |
+| 1 | 10 | 2 | 100 |
+| 1 | 10 | 3 | 200 |
+| 1 | 10 | 4 | 200 |
+
+If you omit `appearances`, `loopr` assumes the full event-level group roster
+participated in each result.
 
 ## Recommended Defaults
 
 For most users, the right starting point is:
 
-- `LOOPREngine()`
+- `rank_entities(...)`
 - default configuration
 - `appearances` included whenever available
 
@@ -77,7 +102,8 @@ evaluation contract, see
 
 ## Public Input Shape
 
-The main public `rank_entities(...)` path expects binary group-result inputs.
+The main public path expects binary group-result inputs and returns
+individual/entity rankings.
 
 ### Matches
 
@@ -112,7 +138,16 @@ Optional per-match participation data:
 - optional `group_id`
 
 If `appearances` are present, `loopr` uses them to determine who actually
-played in a match instead of assuming the full roster participated.
+played in a result instead of assuming the full roster participated.
+
+## Stable API
+
+For published usage, prefer these as the supported surface:
+
+- `rank_entities(...)`
+- `prepare_rank_inputs(...)`
+- `LOOPREngine`
+- `ExposureLogOddsConfig`
 
 The public API is neutral-schema-only. Inputs using the older
 `tournament` / `team` / `user` naming are not part of the supported public
@@ -152,11 +187,12 @@ README is the general entrypoint. The advanced docs live under `docs/`.
 
 ## Common Next Steps
 
-- Use `prepare_rank_inputs(...)` when you want schema validation or normalized
-  internal column names before calling lower-level helpers.
+- Use `prepare_rank_inputs(...)` when you want schema validation before ranking
+  or when debugging normalized inputs.
 - Pass `appearances` when match-level participation differs from the stored
   roster.
-- Start with the default config and validate before tuning; see
+- Start with `rank_entities(...)` and the default config, then validate before
+  tuning; see
   [docs/defaults-and-recipes.md](docs/defaults-and-recipes.md).
 
 ## Development
