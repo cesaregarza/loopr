@@ -7,7 +7,9 @@ using low-rank PageRank updates via Sherman-Morrison-Woodbury formula.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,10 +20,83 @@ import polars as pl
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
+from . import _loo_numba
+
 logger = logging.getLogger(__name__)
 
 EPS = 1e-15
 DANGLING_EPS = 1e-12
+
+
+@dataclass(frozen=True, slots=True)
+class EntityMatchRef:
+    """Compact reference from an entity to one of its matches."""
+
+    match_id: int
+    is_win: bool
+
+
+@dataclass(slots=True)
+class CachedMatch:
+    """Compact per-match cache for exact LOO updates."""
+
+    winner_indices: np.ndarray
+    loser_indices: np.ndarray
+    participant_indices: np.ndarray
+    pair_weight: float
+    sigma: float
+
+    def triplets(self, graph: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Materialize sparse triplets for the requested graph on demand."""
+        if self.winner_indices.size == 0 or self.loser_indices.size == 0:
+            empty_i32 = np.array([], dtype=np.int32)
+            empty_f64 = np.array([], dtype=np.float64)
+            return empty_i32, empty_i32, empty_f64
+
+        if graph == "win":
+            rows = np.repeat(
+                self.winner_indices, self.loser_indices.size
+            ).astype(np.int32, copy=False)
+            cols = np.tile(
+                self.loser_indices, self.winner_indices.size
+            ).astype(np.int32, copy=False)
+        elif graph == "loss":
+            rows = np.repeat(
+                self.loser_indices, self.winner_indices.size
+            ).astype(np.int32, copy=False)
+            cols = np.tile(
+                self.winner_indices, self.loser_indices.size
+            ).astype(np.int32, copy=False)
+        else:
+            raise ValueError(f"Unknown graph {graph}")
+
+        weights = np.full(rows.size, self.pair_weight, dtype=np.float64)
+        return rows, cols, weights
+
+    def delta_rho(self, n: int, *, use_numba: bool = False) -> np.ndarray | None:
+        """Materialize the dense teleport delta only when exact solve needs it."""
+        if self.sigma == 0.0 or self.participant_indices.size == 0:
+            return None
+
+        if use_numba and _loo_numba.NUMBA_AVAILABLE:
+            return _loo_numba.delta_rho_numba(
+                self.participant_indices,
+                self.sigma,
+                n,
+            )
+
+        delta = np.zeros(n, dtype=np.float64)
+        delta[self.participant_indices] -= self.sigma
+        return delta
+
+    def estimated_bytes(self) -> int:
+        """Approximate in-memory footprint of the cached record."""
+        return (
+            self.winner_indices.nbytes
+            + self.loser_indices.nbytes
+            + self.participant_indices.nbytes
+            + 16
+        )
 
 
 # -------------------------
@@ -361,6 +436,30 @@ def block_resolvent_fixed_point(
     return X
 
 
+def block_resolvent_neumann(
+    A_csc: sp.csc_matrix,
+    alpha: float,
+    U: np.ndarray,
+    *,
+    steps: int,
+) -> np.ndarray:
+    """
+    Truncated Neumann approximation of (I - alpha A)^-1 U.
+
+    This is a benchmark-oriented approximation path for explanation ranking.
+    It trades exactness for a fixed number of sparse matvecs.
+    """
+    if U.ndim == 1:
+        U = U[:, None]
+
+    X = U.astype(float, copy=True)
+    term = X.copy()
+    for _ in range(1, max(steps, 1)):
+        term = alpha * (A_csc @ term)
+        X += term
+    return X
+
+
 # -------------------------
 # Column Update Construction
 # -------------------------
@@ -454,9 +553,13 @@ def loo_update_graph_exact(
     tol: float = 1e-10,
     max_iter: int = 400,
     R_solve=None,  # Pre-factorized solver for (I - alpha A)^{-1}
+    solve_strategy: str = "exact",
+    combine_rhs: bool = True,
+    approx_steps: int = 3,
+    check_conditioning: bool = False,
 ) -> tuple[np.ndarray, Dict[str, Any]]:
     """
-    Exact LOO update for a single match on a single PageRank vector.
+    LOO update for a single match on a single PageRank vector.
 
     Returns:
         s_new: Updated PageRank vector
@@ -486,87 +589,90 @@ def loo_update_graph_exact(
         n,
     )
     k = U.shape[1]
+    teleport_requested = delta_rho_vec is not None and np.any(delta_rho_vec)
 
-    if k == 0 and (delta_rho_vec is None or not np.any(delta_rho_vec)):
+    if k == 0 and not teleport_requested:
         return s.copy(), {"k": 0, "teleport_applied": False}
 
-    # X = R U where R = (I - alpha A)^{-1}
-    if k > 0:
-        if R_solve is not None:
-            X = R_solve(U)
-        else:
-            X = block_resolvent_fixed_point(
-                A_csc, alpha, U, tol=tol, max_iter=max_iter
+    v = None
+    teleport_applied = False
+    if teleport_requested:
+        v = (1.0 - alpha) * (rho_new - rho)
+        teleport_norm = (1.0 - alpha) * np.linalg.norm(delta_rho_vec, 1)
+        teleport_applied = teleport_norm >= 1e-12
+
+    def _solve_rhs(rhs: np.ndarray) -> np.ndarray:
+        if solve_strategy == "exact":
+            if R_solve is not None:
+                return R_solve(rhs)
+            return block_resolvent_fixed_point(
+                A_csc, alpha, rhs, tol=tol, max_iter=max_iter
             )
+        if solve_strategy == "neumann":
+            return block_resolvent_neumann(
+                A_csc,
+                alpha,
+                rhs,
+                steps=approx_steps,
+            )
+        raise ValueError(f"Unknown solve_strategy: {solve_strategy}")
 
-        # K = I - E^T X
-        X_rows = X[j_list, :]  # (k, k)
+    X = np.zeros((n, 0), dtype=float)
+    y = None
+    if combine_rhs and k > 0 and teleport_applied:
+        solved = _solve_rhs(np.column_stack([U, v.reshape(-1, 1)]))
+        X = solved[:, :k]
+        y = solved[:, k]
+    else:
+        if k > 0:
+            X = _solve_rhs(U)
+        if teleport_applied:
+            y = _solve_rhs(v.reshape(-1, 1))[:, 0]
+
+    if k > 0:
+        X_rows = X[j_list, :]
         K = np.eye(k, dtype=float) - X_rows
-
-        # Check conditioning of K
-        try:
-            cond = np.linalg.cond(K)
-            if not np.isfinite(cond) or cond > 1e8:
-                logger.warning(
-                    f"K matrix is ill-conditioned: cond={cond:.3e}. Results may be inaccurate."
-                )
-        except Exception:
-            pass  # Conditioning check failed, continue anyway
-
-        # beta solves K beta = g, where g = E^T s = s[j_list]
+        if check_conditioning:
+            try:
+                cond = np.linalg.cond(K)
+                if not np.isfinite(cond) or cond > 1e8:
+                    logger.warning(
+                        "K matrix is ill-conditioned: cond=%.3e. Results may be inaccurate.",
+                        cond,
+                    )
+            except Exception:
+                pass
         beta = np.linalg.solve(K, s[j_list])
         s_star = s + X @ beta
     else:
-        X = np.zeros((n, 0), dtype=float)
         K = np.zeros((0, 0), dtype=float)
         s_star = s.copy()
 
-    # Optional teleport update
-    if delta_rho_vec is not None and np.any(delta_rho_vec):
-        # rho_new was already computed above
-
-        # RHS for teleport change
-        v = (1.0 - alpha) * (rho_new - rho)
-
-        # Skip negligible teleport updates
-        teleport_norm = (1.0 - alpha) * np.linalg.norm(delta_rho_vec, 1)
-        if teleport_norm < 1e-12:
-            return s_star, {
-                "k": k,
-                "teleport_applied": False,
-                "rho_new": rho_new,
-                "j_list": j_list,
-                "K": K if k > 0 else np.zeros((0, 0)),
-            }
-
-        if R_solve is not None:
-            y = R_solve(v.reshape(-1, 1))[:, 0]
-        else:
-            y = block_resolvent_fixed_point(
-                A_csc, alpha, v.reshape(-1, 1), tol=tol, max_iter=max_iter
-            )[:, 0]
-
+    if teleport_applied and y is not None:
         if k > 0:
             gamma = np.linalg.solve(K, y[j_list])
             s_new = s_star + y + X @ gamma
         else:
             s_new = s_star + y
-
         return s_new, {
             "k": k,
             "teleport_applied": True,
             "rho_new": rho_new,
             "j_list": j_list,
             "K": K,
+            "solve_strategy": solve_strategy,
+            "combine_rhs": combine_rhs,
         }
-    else:
-        return s_star, {
-            "k": k,
-            "teleport_applied": False,
-            "rho_new": rho,
-            "j_list": j_list,
-            "K": K,
-        }
+
+    return s_star, {
+        "k": k,
+        "teleport_applied": False,
+        "rho_new": rho_new if teleport_requested else rho,
+        "j_list": j_list,
+        "K": K,
+        "solve_strategy": solve_strategy,
+        "combine_rhs": combine_rhs,
+    }
 
 
 # -------------------------
@@ -640,6 +746,10 @@ class LOOAnalyzer:
 
         # Store actual scores from engine
         self.actual_scores = engine.last_result.scores.astype(float)
+        self._baseline_scores = self._compute_score_vector(
+            self.s_win, self.s_loss, self.rho
+        )
+        self._run_validity_checks = engine.logger.isEnabledFor(logging.DEBUG)
 
         # Build sparse matrices
         logger.info("Building sparse adjacency matrices...")
@@ -668,20 +778,30 @@ class LOOAnalyzer:
 
         # Build match cache for fast triplet/teleport lookup
         logger.info("Building match cache...")
-        self._match_cache = self._build_match_cache()
+        self._match_cache, self._entity_match_index = self._build_match_cache()
 
         logger.info(
             f"LOOAnalyzer initialized: {self.n} nodes, "
             f"{self.A_win.nnz} win edges, {self.A_loss.nnz} loss edges"
         )
 
-    def _build_match_cache(self):
-        """Pre-compute all match triplets and teleport deltas."""
-        cache = {}
+    def _build_match_cache(
+        self,
+    ) -> tuple[
+        dict[int, CachedMatch | None], dict[int, tuple[EntityMatchRef, ...]]
+    ]:
+        """Pre-compute compact per-match records and entity-to-match lookup."""
+        cache: dict[int, CachedMatch | None] = {}
+        entity_match_index: dict[int, list[EntityMatchRef]] = defaultdict(list)
+
         for row in self.matches_df.iter_rows(named=True):
             mid = row["match_id"]
             winners = row.get("winners", []) or []
             losers = row.get("losers", []) or []
+            if not isinstance(winners, list):
+                winners = [winners] if winners is not None else []
+            if not isinstance(losers, list):
+                losers = [losers] if losers is not None else []
             weight = float(row.get("weight", row.get("w_m", 0.0)))
             share = float(row.get("share", 0.0))
 
@@ -695,66 +815,100 @@ class LOOAnalyzer:
                 cache[mid] = None
                 continue
 
-            # Triplets (win graph: loser->winner)
-            rows_w, cols_w = [], []
-            for wi in w_idx:
-                for li in l_idx:
-                    rows_w.append(wi)
-                    cols_w.append(li)
-            wts_w = np.full(
-                len(rows_w), weight / (len(w_idx) * len(l_idx)), dtype=float
+            participant_indices = np.array(w_idx + l_idx, dtype=np.int32)
+            pair_weight = weight / (len(w_idx) * len(l_idx))
+            sigma = share / self._total_exposure if self._total_exposure > 0 else 0.0
+
+            cache[mid] = CachedMatch(
+                winner_indices=np.array(w_idx, dtype=np.int32),
+                loser_indices=np.array(l_idx, dtype=np.int32),
+                participant_indices=participant_indices,
+                pair_weight=float(pair_weight),
+                sigma=float(sigma),
             )
 
-            # Triplets (loss graph: winner->loser)
-            rows_l, cols_l = cols_w, rows_w  # same pairs reversed
-            wts_l = wts_w.copy()
+            for player_id in winners:
+                if player_id in self.node_to_idx:
+                    entity_match_index[player_id].append(
+                        EntityMatchRef(match_id=mid, is_win=True)
+                    )
+            for player_id in losers:
+                if player_id in self.node_to_idx:
+                    entity_match_index[player_id].append(
+                        EntityMatchRef(match_id=mid, is_win=False)
+                    )
 
-            # Teleport delta in normalized space
-            sigma = (
-                share / self._total_exposure
-                if self._total_exposure > 0
-                else 0.0
-            )
-            delta_rho = np.zeros(self.n, dtype=float)
-            for p in winners + losers:
-                j = self.node_to_idx.get(p)
-                if j is not None:
-                    delta_rho[j] -= sigma
+        frozen_index = {
+            entity_id: tuple(refs)
+            for entity_id, refs in entity_match_index.items()
+        }
+        return cache, frozen_index
 
-            cache[mid] = (
-                np.array(rows_w, np.int32),
-                np.array(cols_w, np.int32),
-                wts_w,
-                np.array(rows_l, np.int32),
-                np.array(cols_l, np.int32),
-                wts_l,
-                delta_rho,
-            )
-        return cache
+    def _compute_score_at(
+        self,
+        s_win: np.ndarray,
+        s_loss: np.ndarray,
+        rho_vec: np.ndarray,
+        idx: int,
+    ) -> float:
+        """Compute one log-odds score from PageRank state."""
+        sw = max(float(s_win[idx]), 0.0)
+        sl = max(float(s_loss[idx]), 0.0)
+
+        min_floor = 0.5 * (1.0 - self.alpha) * rho_vec[idx]
+        w = max(sw, min_floor) + self.lam * rho_vec[idx]
+        l = max(sl, min_floor) + self.lam * rho_vec[idx]
+        return float(np.log(w / l))
+
+    def _compute_score_vector(
+        self,
+        s_win: np.ndarray,
+        s_loss: np.ndarray,
+        rho_vec: np.ndarray,
+    ) -> np.ndarray:
+        """Compute the full log-odds vector for one PageRank state."""
+        sw = np.maximum(s_win.astype(float, copy=False), 0.0)
+        sl = np.maximum(s_loss.astype(float, copy=False), 0.0)
+        min_floor = 0.5 * (1.0 - self.alpha) * rho_vec
+        w = np.maximum(sw, min_floor) + self.lam * rho_vec
+        l = np.maximum(sl, min_floor) + self.lam * rho_vec
+        return np.log(w / l)
+
+    def estimate_cache_bytes(self) -> int:
+        """Approximate the in-memory footprint of LOO cache structures."""
+        total = 0
+        for match_data in self._match_cache.values():
+            if match_data is not None:
+                total += match_data.estimated_bytes()
+        for refs in self._entity_match_index.values():
+            total += len(refs) * 16
+        return total
 
     def exposures_for_match(
         self, match_id: int, graph: str = "win"
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Get match triplets for specified graph."""
-        return exposures_for_match(
-            match_id, self.matches_df, self.players_df, self.node_to_idx, graph
-        )
+        match_data = self._match_cache.get(match_id)
+        if match_data is None:
+            empty_i32 = np.array([], dtype=np.int32)
+            empty_f64 = np.array([], dtype=np.float64)
+            return empty_i32, empty_i32, empty_f64
+        return match_data.triplets(graph)
 
     def delta_rho_for_match(self, match_id: int) -> np.ndarray | None:
         """Get teleport vector change for match removal."""
-        return delta_rho_for_match(
-            match_id,
-            self.matches_df,
-            self.players_df,
-            self.node_to_idx,
-            self._total_exposure,
-        )
+        match_data = self._match_cache.get(match_id)
+        if match_data is None:
+            return np.zeros(self.n)
+        return match_data.delta_rho(self.n)
 
     def node_index_for_entity(self, entity_id: int) -> Optional[int]:
         """Get node index for an entity ID."""
         return self.node_to_idx.get(entity_id, None)
 
-    def _estimate_match_flux(self, match_id: int, entity_id: int) -> float:
+    def _estimate_match_flux(
+        self, match_id: int, entity_id: int, *, use_numba: bool = False
+    ) -> float:
         """
         Estimate flux for a match without full LOO computation.
 
@@ -773,67 +927,91 @@ class LOOAnalyzer:
         if match_data is None:
             return 0.0
 
-        rows_w, cols_w, wts_w, rows_l, cols_l, wts_l, _ = match_data
-
         entity_idx = self.node_index_for_entity(entity_id)
         if entity_idx is None:
             return 0.0
 
+        winners = match_data.winner_indices
+        losers = match_data.loser_indices
+        pair_weight = match_data.pair_weight
+        if use_numba and _loo_numba.NUMBA_AVAILABLE:
+            return float(
+                _loo_numba.estimate_match_flux_numba(
+                    entity_idx,
+                    winners,
+                    losers,
+                    pair_weight,
+                    self.alpha,
+                    self.s_win,
+                    self.s_loss,
+                    self.T_win,
+                    self.T_loss,
+                )
+            )
+
         total_flux = 0.0
 
-        # Estimate win flux (incoming to player if they won)
-        for i, j, w in zip(rows_w, cols_w, wts_w):
-            if i == entity_idx:
-                if self.T_win[j] > 0:
-                    flux = self.alpha * self.s_win[j] * (w / self.T_win[j])
-                    total_flux += flux
-            elif j == entity_idx:
-                if self.T_win[entity_idx] > 0:
-                    flux = (
-                        self.alpha
-                        * self.s_win[entity_idx]
-                        * (w / self.T_win[entity_idx])
-                    )
-                    total_flux += flux
+        if np.any(winners == entity_idx):
+            denom = self.T_win[losers]
+            valid = denom > 0
+            if np.any(valid):
+                total_flux += self.alpha * pair_weight * float(
+                    np.sum(self.s_win[losers[valid]] / denom[valid])
+                )
+        elif np.any(losers == entity_idx) and self.T_win[entity_idx] > 0:
+            total_flux += (
+                winners.size
+                * self.alpha
+                * self.s_win[entity_idx]
+                * (pair_weight / self.T_win[entity_idx])
+            )
 
-        # Estimate loss flux (incoming to player if they lost)
-        for i, j, w in zip(rows_l, cols_l, wts_l):
-            if i == entity_idx:
-                if self.T_loss[j] > 0:
-                    flux = self.alpha * self.s_loss[j] * (w / self.T_loss[j])
-                    total_flux += flux
-            elif j == entity_idx:
-                if self.T_loss[entity_idx] > 0:
-                    flux = (
-                        self.alpha
-                        * self.s_loss[entity_idx]
-                        * (w / self.T_loss[entity_idx])
-                    )
-                    total_flux += flux
+        if np.any(losers == entity_idx):
+            denom = self.T_loss[winners]
+            valid = denom > 0
+            if np.any(valid):
+                total_flux += self.alpha * pair_weight * float(
+                    np.sum(self.s_loss[winners[valid]] / denom[valid])
+                )
+        elif np.any(winners == entity_idx) and self.T_loss[entity_idx] > 0:
+            total_flux += (
+                losers.size
+                * self.alpha
+                * self.s_loss[entity_idx]
+                * (pair_weight / self.T_loss[entity_idx])
+            )
 
         return total_flux
 
-    def impact_of_match_on_entity(
+    def _format_impact_result(
+        self, match_ref: EntityMatchRef, impact: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if not impact["ok"]:
+            return None
+        return {
+            "match_id": match_ref.match_id,
+            "is_win": match_ref.is_win,
+            "old_score": impact["old"]["score"],
+            "new_score": impact["new"]["score"],
+            "score_delta": impact["delta"]["score"],
+            "abs_delta": abs(impact["delta"]["score"]),
+            "win_pr_delta": impact["delta"]["s_win"],
+            "loss_pr_delta": impact["delta"]["s_loss"],
+        }
+
+    def _impact_of_match_on_entity_variant(
         self,
         match_id: int,
         entity_id: int,
-        include_teleport: bool = True,
-        tol: float = 1e-10,
-        max_iter: int = 400,
+        *,
+        include_teleport: bool,
+        solve_strategy: str,
+        combine_rhs: bool,
+        approx_steps: int,
+        use_numba: bool,
+        tol: float,
+        max_iter: int,
     ) -> dict[str, Any]:
-        """
-        Compute exact change in an entity's log-odds score if match is removed.
-
-        Args:
-            match_id: Match to remove
-            entity_id: Entity to analyze
-            include_teleport: Whether to account for teleport vector changes
-            tol: Convergence tolerance for solvers
-            max_iter: Maximum iterations for solvers
-
-        Returns:
-            Dictionary with old/new scores and detailed components
-        """
         k = self.node_index_for_entity(entity_id)
         if k is None:
             return {
@@ -841,7 +1019,6 @@ class LOOAnalyzer:
                 "reason": f"entity_id {entity_id} not found in node mapping",
             }
 
-        # Get cached match data
         match_data = self._match_cache.get(match_id)
         if match_data is None:
             return {
@@ -849,33 +1026,56 @@ class LOOAnalyzer:
                 "reason": f"match_id {match_id} not found or has no valid edges",
             }
 
-        (
-            rows_w,
-            cols_w,
-            wts_w,
-            rows_l,
-            cols_l,
-            wts_l,
-            delta_rho_cached,
-        ) = match_data
+        rows_w, cols_w, wts_w = match_data.triplets("win")
+        rows_l, cols_l, wts_l = match_data.triplets("loss")
+        delta_rho = (
+            match_data.delta_rho(self.n, use_numba=use_numba)
+            if include_teleport
+            else None
+        )
 
-        # Use cached teleport delta if requested
-        delta_rho = delta_rho_cached if include_teleport else None
-
-        # Early exit if flux is negligible
-        flux_estimate = self._estimate_match_flux(match_id, entity_id)
+        flux_estimate = self._estimate_match_flux(
+            match_id, entity_id, use_numba=use_numba
+        )
         if abs(flux_estimate) < 1e-12:
+            old_score = float(self.actual_scores[k])
             return {
                 "ok": True,
-                "old_score": self.actual_scores[k],
-                "new_score": self.actual_scores[k],
-                "delta": 0.0,
-                "flux_estimate": flux_estimate,
-                "early_exit": "negligible_flux",
+                "entity_id": entity_id,
+                "match_id": match_id,
+                "old": {
+                    "score": old_score,
+                    "s_win": float(self.s_win[k]),
+                    "s_loss": float(self.s_loss[k]),
+                    "rho": float(self.rho[k]),
+                },
+                "new": {
+                    "score": old_score,
+                    "s_win": float(self.s_win[k]),
+                    "s_loss": float(self.s_loss[k]),
+                    "rho": float(self.rho[k]),
+                },
+                "delta": {
+                    "score": 0.0,
+                    "s_win": 0.0,
+                    "s_loss": 0.0,
+                    "rho": 0.0,
+                },
+                "internals": {
+                    "alpha": self.alpha,
+                    "lambda_smooth": self.lam,
+                    "k_win_columns": 0,
+                    "k_loss_columns": 0,
+                    "teleport_applied": False,
+                    "flux_estimate": flux_estimate,
+                    "early_exit": "negligible_flux",
+                    "solve_strategy": solve_strategy,
+                    "combine_rhs": combine_rhs,
+                    "approx_steps": approx_steps,
+                    "use_numba": use_numba,
+                },
             }
 
-        # Update win graph
-        logger.debug(f"Updating win graph for match {match_id}...")
         s_win_new, aux_win = loo_update_graph_exact(
             self.A_win,
             self.s_win,
@@ -889,15 +1089,16 @@ class LOOAnalyzer:
             tol=tol,
             max_iter=max_iter,
             R_solve=self._win_solver.solve,
+            solve_strategy=solve_strategy,
+            combine_rhs=combine_rhs,
+            approx_steps=approx_steps,
+            check_conditioning=self._run_validity_checks,
         )
+        if self._run_validity_checks:
+            self._check_pagerank_validity(
+                "s_win_new", s_win_new, aux_win.get("rho_new", self.rho)
+            )
 
-        # Check win PageRank validity
-        self._check_pagerank_validity(
-            "s_win_new", s_win_new, aux_win.get("rho_new", self.rho)
-        )
-
-        # Update loss graph
-        logger.debug(f"Updating loss graph for match {match_id}...")
         s_loss_new, aux_loss = loo_update_graph_exact(
             self.A_loss,
             self.s_loss,
@@ -911,41 +1112,22 @@ class LOOAnalyzer:
             tol=tol,
             max_iter=max_iter,
             R_solve=self._loss_solver.solve,
+            solve_strategy=solve_strategy,
+            combine_rhs=combine_rhs,
+            approx_steps=approx_steps,
+            check_conditioning=self._run_validity_checks,
         )
+        if self._run_validity_checks:
+            self._check_pagerank_validity(
+                "s_loss_new", s_loss_new, aux_loss.get("rho_new", self.rho)
+            )
 
-        # Check loss PageRank validity
-        self._check_pagerank_validity(
-            "s_loss_new", s_loss_new, aux_loss.get("rho_new", self.rho)
-        )
-
-        # Use updated rho if teleport was applied
-        rho_new = (
-            aux_win.get("rho_new", self.rho) if include_teleport else self.rho
-        )
-
-        # Compute scores
-        def score_from(s_w, s_l, rho_vec, idx):
-            # Project PageRank to non-negative (guards against tiny negatives from linear solves)
-            sw = max(float(s_w[idx]), 0.0)
-            sl = max(float(s_l[idx]), 0.0)
-
-            # Theory-consistent floor: PageRank ensures s_i >= (1-alpha)*rho_i
-            # Use half the baseline as a conservative floor
-            min_floor = 0.5 * (1.0 - self.alpha) * rho_vec[idx]
-
-            # Apply floor and add smoothing
-            w = max(sw, min_floor) + self.lam * rho_vec[idx]
-            l = max(sl, min_floor) + self.lam * rho_vec[idx]
-            return float(np.log(w / l))
-
-        # Use actual score from engine for old_score
+        rho_new = aux_win.get("rho_new", self.rho) if include_teleport else self.rho
         old_score = float(self.actual_scores[k])
-        # Compute what the new score would be
-        new_score_computed = score_from(s_win_new, s_loss_new, rho_new, k)
-        # The delta is the difference
-        score_delta = new_score_computed - score_from(
-            self.s_win, self.s_loss, self.rho, k
+        new_score_computed = self._compute_score_at(
+            s_win_new, s_loss_new, rho_new, k
         )
+        score_delta = new_score_computed - float(self._baseline_scores[k])
         new_score = old_score + score_delta
 
         return {
@@ -977,8 +1159,107 @@ class LOOAnalyzer:
                 "k_loss_columns": aux_loss["k"],
                 "teleport_applied": aux_win["teleport_applied"]
                 or aux_loss["teleport_applied"],
+                "solve_strategy": solve_strategy,
+                "combine_rhs": combine_rhs,
+                "approx_steps": approx_steps,
+                "use_numba": use_numba,
             },
         }
+
+    def impact_of_match_on_entity(
+        self,
+        match_id: int,
+        entity_id: int,
+        include_teleport: bool = True,
+        tol: float = 1e-10,
+        max_iter: int = 400,
+    ) -> dict[str, Any]:
+        """
+        Compute exact change in an entity's log-odds score if match is removed.
+
+        Args:
+            match_id: Match to remove
+            entity_id: Entity to analyze
+            include_teleport: Whether to account for teleport vector changes
+            tol: Convergence tolerance for solvers
+            max_iter: Maximum iterations for solvers
+
+        Returns:
+            Dictionary with old/new scores and detailed components
+        """
+        return self._impact_of_match_on_entity_variant(
+            match_id,
+            entity_id,
+            include_teleport=include_teleport,
+            solve_strategy="exact",
+            combine_rhs=True,
+            approx_steps=3,
+            use_numba=False,
+            tol=tol,
+            max_iter=max_iter,
+        )
+
+    def impact_of_match_on_entity_variant(
+        self,
+        match_id: int,
+        entity_id: int,
+        *,
+        variant: str,
+        include_teleport: bool = True,
+        tol: float = 1e-10,
+        max_iter: int = 400,
+    ) -> dict[str, Any]:
+        """Internal variant hook for benchmark and profiling experiments."""
+        variant_map = {
+            "exact_separate": {
+                "solve_strategy": "exact",
+                "combine_rhs": False,
+                "approx_steps": 3,
+                "use_numba": False,
+            },
+            "exact_combined": {
+                "solve_strategy": "exact",
+                "combine_rhs": True,
+                "approx_steps": 3,
+                "use_numba": False,
+            },
+            "perturb_2": {
+                "solve_strategy": "neumann",
+                "combine_rhs": True,
+                "approx_steps": 2,
+                "use_numba": False,
+            },
+            "perturb_4": {
+                "solve_strategy": "neumann",
+                "combine_rhs": True,
+                "approx_steps": 4,
+                "use_numba": False,
+            },
+            "exact_combined_numba": {
+                "solve_strategy": "exact",
+                "combine_rhs": True,
+                "approx_steps": 3,
+                "use_numba": True,
+            },
+        }
+        if variant not in variant_map:
+            raise ValueError(f"Unsupported LOO variant: {variant}")
+
+        config = variant_map[variant]
+        if config["use_numba"] and not _loo_numba.NUMBA_AVAILABLE:
+            raise RuntimeError("Requested numba LOO variant but numba is unavailable")
+
+        return self._impact_of_match_on_entity_variant(
+            match_id,
+            entity_id,
+            include_teleport=include_teleport,
+            solve_strategy=config["solve_strategy"],
+            combine_rhs=config["combine_rhs"],
+            approx_steps=config["approx_steps"],
+            use_numba=config["use_numba"],
+            tol=tol,
+            max_iter=max_iter,
+        )
 
     def analyze_entity_matches(
         self,
@@ -1003,104 +1284,106 @@ class LOOAnalyzer:
         Returns:
             DataFrame with match impacts sorted by absolute score change
         """
-        entity_matches = []
+        return self.analyze_entity_matches_variant(
+            entity_id,
+            variant="exact_combined",
+            limit=limit,
+            include_teleport=include_teleport,
+            use_flux_ranking=use_flux_ranking,
+            parallel=parallel,
+            max_workers=max_workers,
+        )
 
-        for match in self.matches_df.iter_rows(named=True):
-            winners = match.get("winners", [])
-            losers = match.get("losers", [])
+    def analyze_entity_matches_variant(
+        self,
+        entity_id: int,
+        *,
+        variant: str,
+        limit: Optional[int] = None,
+        include_teleport: bool = True,
+        use_flux_ranking: bool = True,
+        parallel: bool = True,
+        max_workers: int = 4,
+    ) -> pl.DataFrame:
+        """Internal variant hook for benchmark and profiling experiments."""
+        entity_matches = list(self._entity_match_index.get(entity_id, ()))
+        if not entity_matches:
+            return pl.DataFrame()
 
-            if not isinstance(winners, list):
-                winners = [winners] if winners is not None else []
-            if not isinstance(losers, list):
-                losers = [losers] if losers is not None else []
+        if variant == "exact_combined_numba" and not _loo_numba.NUMBA_AVAILABLE:
+            raise RuntimeError("Requested numba LOO variant but numba is unavailable")
 
-            if entity_id in winners or entity_id in losers:
-                match_info = {
-                    "match_id": match["match_id"],
-                    "is_win": entity_id in winners,
-                    "flux_estimate": 0.0,
-                }
-
-                # If using flux ranking, compute preliminary flux estimate
-                if use_flux_ranking:
-                    flux_est = self._estimate_match_flux(
-                        match["match_id"], entity_id
-                    )
-                    match_info["flux_estimate"] = flux_est
-
-                entity_matches.append(match_info)
-
-        # Sort by flux estimate if using flux ranking
-        if use_flux_ranking and entity_matches:
-            entity_matches.sort(
-                key=lambda x: abs(x["flux_estimate"]), reverse=True
-            )
-
-        if limit:
+        use_numba = variant == "exact_combined_numba"
+        use_flux_prefilter = (
+            use_flux_ranking and limit is not None and len(entity_matches) > limit
+        )
+        if use_flux_prefilter:
+            ranked_matches = [
+                (
+                    ref,
+                    self._estimate_match_flux(
+                        ref.match_id, entity_id, use_numba=use_numba
+                    ),
+                )
+                for ref in entity_matches
+            ]
+            ranked_matches.sort(key=lambda item: abs(item[1]), reverse=True)
+            entity_matches = [ref for ref, _flux in ranked_matches[:limit]]
+        elif limit:
             entity_matches = entity_matches[:limit]
+
+        use_parallel = parallel and max_workers > 1 and len(entity_matches) > 4
 
         # Analyze each match
         results = []
 
-        if parallel and len(entity_matches) > 1:
+        if use_parallel:
             # Parallel execution
-            def _impact_single(match_info):
-                impact = self.impact_of_match_on_entity(
-                    match_info["match_id"],
+            def _impact_single(match_ref: EntityMatchRef):
+                impact = self.impact_of_match_on_entity_variant(
+                    match_ref.match_id,
                     entity_id,
+                    variant=variant,
                     include_teleport=include_teleport,
                 )
-                return match_info, impact
+                return match_ref, impact
 
             with ThreadPoolExecutor(
                 max_workers=min(max_workers, len(entity_matches))
             ) as ex:
-                futures = [ex.submit(_impact_single, mi) for mi in entity_matches]
+                futures = [ex.submit(_impact_single, ref) for ref in entity_matches]
                 for i, fut in enumerate(as_completed(futures)):
-                    match_info, impact = fut.result()
-                    logger.info(
-                        f"Completed match {i+1}/{len(entity_matches)}: {match_info['match_id']}"
+                    match_ref, impact = fut.result()
+                    logger.debug(
+                        "Completed match %s/%s: %s",
+                        i + 1,
+                        len(entity_matches),
+                        match_ref.match_id,
                     )
 
-                    if impact["ok"]:
-                        results.append(
-                            {
-                                "match_id": match_info["match_id"],
-                                "is_win": match_info["is_win"],
-                                "old_score": impact["old"]["score"],
-                                "new_score": impact["new"]["score"],
-                                "score_delta": impact["delta"]["score"],
-                                "abs_delta": abs(impact["delta"]["score"]),
-                                "win_pr_delta": impact["delta"]["s_win"],
-                                "loss_pr_delta": impact["delta"]["s_loss"],
-                            }
-                        )
+                    row = self._format_impact_result(match_ref, impact)
+                    if row is not None:
+                        results.append(row)
         else:
             # Sequential execution
-            for i, match_info in enumerate(entity_matches):
-                logger.info(
-                    f"Analyzing match {i+1}/{len(entity_matches)}: {match_info['match_id']}"
+            for i, match_ref in enumerate(entity_matches):
+                logger.debug(
+                    "Analyzing match %s/%s: %s",
+                    i + 1,
+                    len(entity_matches),
+                    match_ref.match_id,
                 )
 
-                impact = self.impact_of_match_on_entity(
-                    match_info["match_id"],
+                impact = self.impact_of_match_on_entity_variant(
+                    match_ref.match_id,
                     entity_id,
+                    variant=variant,
                     include_teleport=include_teleport,
                 )
 
-                if impact["ok"]:
-                    results.append(
-                        {
-                            "match_id": match_info["match_id"],
-                            "is_win": match_info["is_win"],
-                            "old_score": impact["old"]["score"],
-                            "new_score": impact["new"]["score"],
-                            "score_delta": impact["delta"]["score"],
-                            "abs_delta": abs(impact["delta"]["score"]),
-                            "win_pr_delta": impact["delta"]["s_win"],
-                            "loss_pr_delta": impact["delta"]["s_loss"],
-                        }
-                    )
+                row = self._format_impact_result(match_ref, impact)
+                if row is not None:
+                    results.append(row)
 
         if not results:
             return pl.DataFrame()

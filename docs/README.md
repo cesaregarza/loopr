@@ -15,6 +15,9 @@ patterns, engine behavior, and analysis features.
 - [how-loopr-works.md](how-loopr-works.md)
   - deeper technical walk-through of normalization, weighting, graph prep, and engine execution
   - explains `weight` vs `share`, pair edges vs row edges, and how the engines diverge
+- [mathematical-machinery.md](mathematical-machinery.md)
+  - equations and mental model for exposure log-odds scoring
+  - exact low-rank leave-one-match-out updates and the perturbation approximation
 - [engines-and-configuration.md](engines-and-configuration.md)
   - when to use `LOOPREngine`, `TickTockEngine`, or `TTLEngine`
   - output columns and major configuration knobs

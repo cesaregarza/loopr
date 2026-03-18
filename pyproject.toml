@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+accel = ["numba>=0.60"]
 
 [project.scripts]
 loopr = "loopr.cli:main"

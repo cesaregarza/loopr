@@ -8,6 +8,9 @@ available around the main engine.
 `LOOPREngine` supports exact leave-one-match-out analysis based on low-rank
 PageRank updates.
 
+For the derivation and the benchmarked perturbation approximation, see
+[mathematical-machinery.md](mathematical-machinery.md).
+
 Typical flow:
 
 ```python
@@ -37,6 +40,15 @@ Useful methods:
 - `analyze_match_impact(match_id, entity_id, include_teleport=True)`
 - `analyze_entity_matches(entity_id, limit=None, include_teleport=True, parallel=True, max_workers=4)`
 - `get_loo_analyzer()`
+
+Behavior notes:
+
+- `analyze_match_impact(...)` is an exact single-match leave-one-out update.
+- `analyze_entity_matches(..., limit=None)` exact-evaluates every match involving
+  that entity.
+- `analyze_entity_matches(..., limit=K)` can use a fast flux-based pre-ranking
+  step internally to choose which matches to exact-evaluate, but the returned
+  rows still contain exact LOO deltas.
 
 `analyze_entity_matches(...)` returns a `DataFrame` sorted by absolute impact
 with columns such as:
@@ -77,6 +89,7 @@ ranking run.
 A synthetic benchmark script is included at:
 
 - [`benchmarks/benchmark_rank_entities.py`](../benchmarks/benchmark_rank_entities.py)
+- [`benchmarks/benchmark_loo.py`](../benchmarks/benchmark_loo.py)
 
 Example:
 
@@ -89,12 +102,29 @@ PYTHONPATH=src python benchmarks/benchmark_rank_entities.py \
   --repeats 3
 ```
 
+```bash
+PYTHONPATH=src python benchmarks/benchmark_loo.py \
+  --dataset sendou_window \
+  --limit-tournaments 100 \
+  --variants exact_combined exact_separate perturb_2 perturb_4 \
+  --entity-limits 20 50 \
+  --repeats 3
+```
+
 The script prints JSON with:
 
 - workload size
 - row counts
 - min / mean / max runtime
 - mean per-stage timings from `LOOPREngine.last_stage_timings`
+
+The LOO benchmark additionally reports:
+
+- analyzer preparation time
+- per-variant exact or approximate single-impact runtime
+- per-variant per-entity batch-analysis runtime for the requested limits
+- overlap and delta-correlation against the exact combined baseline
+- approximate cache footprint
 
 For the broader evaluation story, including how to structure external
 validation and ablation reports, see

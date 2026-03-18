@@ -213,6 +213,7 @@ README is the general entrypoint. The advanced docs live under `docs/`.
 - [docs/README.md](docs/README.md): advanced docs index
 - [docs/input-patterns.md](docs/input-patterns.md): detailed schema guidance, participants, appearances, and normalization
 - [docs/how-loopr-works.md](docs/how-loopr-works.md): deeper technical walkthrough of weighting, graph construction, and engine execution
+- [docs/mathematical-machinery.md](docs/mathematical-machinery.md): equations and intuition for the log-odds score, exact LOO updates, and the perturbation approximation
 - [docs/engines-and-configuration.md](docs/engines-and-configuration.md): engine comparison, outputs, and configuration knobs
 - [docs/defaults-and-recipes.md](docs/defaults-and-recipes.md): recommended starting setup, conservative debugging baseline, and a minimal ablation grid
 - [docs/validation-and-benchmarks.md](docs/validation-and-benchmarks.md): how to evaluate `loopr`, structure benchmark reports, and separate runtime evidence from model-quality evidence

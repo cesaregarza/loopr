@@ -331,6 +331,10 @@ The rough idea is:
 That is why the library can provide exact per-match impact analysis without
 recomputing the entire ranking from zero for every query.
 
+For the actual equations behind the exact low-rank update and the newer
+perturbation approximation used in benchmarking, see
+[mathematical-machinery.md](mathematical-machinery.md).
+
 ## Mental Model Summary
 
 If you want the shortest deep mental model, it is this:
@@ -347,5 +351,7 @@ If you want the shortest deep mental model, it is this:
 - [input-patterns.md](input-patterns.md) for the public input boundary
 - [engines-and-configuration.md](engines-and-configuration.md) for engine
   selection and tuning
+- [mathematical-machinery.md](mathematical-machinery.md) for the scoring and
+  LOO equations
 - [analysis-and-diagnostics.md](analysis-and-diagnostics.md) for the public
   analysis-facing features
