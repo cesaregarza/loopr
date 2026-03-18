@@ -8,6 +8,7 @@ from pathlib import Path
 
 import polars as pl
 
+from loopr._version import __version__
 from loopr.api import rank_entities
 
 
@@ -39,6 +40,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loopr",
         description="Rank individuals from team-shaped competition results.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -86,8 +92,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "rank":
-        return _run_rank_command(args)
+    try:
+        if args.command == "rank":
+            return _run_rank_command(args)
+    except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
+        sys.stderr.write(f"{parser.prog}: error: {exc}\n")
+        return 2
 
     parser.error(f"Unknown command: {args.command}")
     return 2

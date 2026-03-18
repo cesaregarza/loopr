@@ -22,6 +22,24 @@ from loopr.core.constants import (
 )
 
 
+def _sample_rows(
+    frame: pl.DataFrame,
+    columns: list[str],
+    *,
+    limit: int = 5,
+) -> str:
+    sample = (
+        frame.select(columns)
+        .unique()
+        .head(limit)
+        .iter_rows(named=True)
+    )
+    return ", ".join(
+        "/".join(str(row[column]) for column in columns)
+        for row in sample
+    )
+
+
 @dataclass(frozen=True)
 class WeightedMatches:
     """Normalized matches with timestamps and weights attached."""
@@ -345,6 +363,23 @@ def _group_match_appearances(
 
     appearance_rows = appearances
     if "team_id" not in appearance_rows.columns:
+        ambiguous_participants = (
+            participants.select(["tournament_id", "user_id", "team_id"])
+            .group_by(["tournament_id", "user_id"])
+            .agg(pl.col("team_id").n_unique().alias("team_count"))
+            .filter(pl.col("team_count") > 1)
+        )
+        if ambiguous_participants.height > 0:
+            sample = _sample_rows(
+                ambiguous_participants,
+                ["tournament_id", "user_id"],
+            )
+            raise ValueError(
+                "appearances is missing group_id for entities assigned to "
+                "multiple groups within the same event. Add group_id to "
+                f"disambiguate. Sample event_id/entity_id pairs: {sample}"
+            )
+
         team_lookup = participants.select(
             ["tournament_id", "user_id", "team_id"]
         ).unique(subset=["tournament_id", "user_id"], keep="any")
@@ -354,7 +389,18 @@ def _group_match_appearances(
             how="left",
         )
 
-    appearance_rows = appearance_rows.drop_nulls("team_id")
+    unresolved_rows = appearance_rows.filter(pl.col("team_id").is_null())
+    if unresolved_rows.height > 0:
+        sample = _sample_rows(
+            unresolved_rows,
+            ["tournament_id", "match_id", "user_id"],
+        )
+        raise ValueError(
+            "Could not infer group_id for some appearances. Ensure each "
+            "appearance entity exists in participants for the same event. "
+            f"Sample event_id/match_id/entity_id rows: {sample}"
+        )
+
     if appearance_rows.is_empty():
         return None
 
@@ -456,15 +502,26 @@ def _assign_match_rosters(
         winners_expr = pl.col("winner_roster").alias(WINNERS)
         losers_expr = pl.col("loser_roster").alias(LOSERS)
 
-    return (
-        match_data.with_columns([winners_expr, losers_expr])
-        .filter(
-            pl.col(WINNERS).is_not_null()
-            & pl.col(LOSERS).is_not_null()
-            & (pl.col(WINNERS).list.len() > 0)
-            & (pl.col(LOSERS).list.len() > 0)
-        )
+    resolved_match_data = match_data.with_columns([winners_expr, losers_expr])
+    invalid_rows = resolved_match_data.filter(
+        pl.col(WINNERS).is_null()
+        | pl.col(LOSERS).is_null()
+        | (pl.col(WINNERS).list.len() == 0)
+        | (pl.col(LOSERS).list.len() == 0)
     )
+    if invalid_rows.height > 0:
+        sample = _sample_rows(
+            invalid_rows,
+            [MATCH_ID, TOURNAMENT_ID],
+        )
+        raise ValueError(
+            "Could not resolve winner/loser participants for some matches. "
+            "Ensure participants include both teams for every match and that "
+            "appearances align with those teams. "
+            f"Sample match_id/event_id pairs: {sample}"
+        )
+
+    return resolved_match_data
 
 
 def _finalize_resolved_match_rows(

@@ -47,7 +47,7 @@ Requires Python 3.10+.
 ## Docker Build
 
 The wheel and sdist release path is also available through the multi-stage
-[`Dockerfile`](Dockerfile).
+`Dockerfile`.
 
 Run tests and quickstart smoke inside Docker:
 
@@ -73,7 +73,7 @@ loopr rank \
   --output rankings.csv
 ```
 
-If you do not want to install the console script yet:
+If the package is installed and you prefer the module entrypoint:
 
 ```bash
 python -m loopr rank \
@@ -141,9 +141,9 @@ If your spreadsheets look like this, you are on the happy path.
 If you omit `appearances`, `loopr` assumes the full event-level group roster
 participated in each result.
 
-The example files shown above live in
-[`examples/quickstart/`](examples/quickstart/).
-They are generated from a deterministic simulator with:
+The example files shown above live in the repository under
+`examples/quickstart/`. They are not installed with the wheel. After
+installing the package, you can regenerate them with:
 
 ```bash
 python -m loopr.example_data --output-dir examples/quickstart
@@ -159,10 +159,8 @@ For most users, the right starting point is:
 
 Treat the output as a ranking signal, not a calibrated probability-like score.
 Tune only after you have an external validation target or a clear operational
-reason. For the opinionated defaults guide, see
-[docs/defaults-and-recipes.md](docs/defaults-and-recipes.md). For the reusable
-evaluation contract, see
-[docs/validation-harness.md](docs/validation-harness.md).
+reason. The deeper guidance lives in the repository docs under
+`docs/defaults-and-recipes.md` and `docs/validation-harness.md`.
 
 ## Public Input Shape
 
@@ -237,19 +235,20 @@ backend such as the log-odds backend.
 
 ## Documentation
 
-README is the general entrypoint. The advanced docs live under `docs/`.
+README is the general entrypoint. The advanced docs live in the repository
+under `docs/`, including:
 
-- [docs/README.md](docs/README.md): advanced docs index
-- [docs/input-patterns.md](docs/input-patterns.md): detailed schema guidance, participants, appearances, and normalization
-- [docs/how-loopr-works.md](docs/how-loopr-works.md): deeper technical walkthrough of weighting, graph construction, and engine execution
-- [docs/mathematical-machinery.md](docs/mathematical-machinery.md): equations and intuition for the log-odds score, exact LOO updates, and the perturbation approximation
-- [docs/engines-and-configuration.md](docs/engines-and-configuration.md): engine comparison, outputs, and configuration knobs
-- [docs/defaults-and-recipes.md](docs/defaults-and-recipes.md): recommended starting setup, conservative debugging baseline, and a minimal ablation grid
-- [docs/validation-and-benchmarks.md](docs/validation-and-benchmarks.md): how to evaluate `loopr`, structure benchmark reports, and separate runtime evidence from model-quality evidence
-- [docs/validation-harness.md](docs/validation-harness.md): the concrete contract for future reusable validation runs, reports, and benchmark artifacts
-- [docs/ablations.md](docs/ablations.md): how to compare ingredients like appearances, decay, tournament influence, and tick-tock cleanly
-- [docs/case-studies/README.md](docs/case-studies/README.md): concrete applied examples, including the Sendou Plus validation case study
-- [docs/analysis-and-diagnostics.md](docs/analysis-and-diagnostics.md): leave-one-match-out analysis, diagnostics, and benchmarking
+- `docs/README.md`: advanced docs index
+- `docs/input-patterns.md`: schema guidance and normalization
+- `docs/how-loopr-works.md`: technical walkthrough
+- `docs/mathematical-machinery.md`: equations and intuition
+- `docs/engines-and-configuration.md`: engine comparison and configuration
+- `docs/defaults-and-recipes.md`: starting setup and baseline recipes
+- `docs/validation-and-benchmarks.md`: evaluation guidance
+- `docs/validation-harness.md`: reusable validation contract
+- `docs/ablations.md`: ingredient-level comparison design
+- `docs/case-studies/README.md`: applied examples
+- `docs/analysis-and-diagnostics.md`: diagnostics and LOO analysis
 
 ## Common Next Steps
 
@@ -258,8 +257,7 @@ README is the general entrypoint. The advanced docs live under `docs/`.
 - Pass `appearances` when match-level participation differs from the stored
   roster.
 - Start with `rank_entities(...)` and the default config, then validate before
-  tuning; see
-  [docs/defaults-and-recipes.md](docs/defaults-and-recipes.md).
+  tuning; see `docs/defaults-and-recipes.md` in the repository.
 
 ## Development
 

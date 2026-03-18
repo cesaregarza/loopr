@@ -1,4 +1,4 @@
-from loopr import convert_matches_dataframe
+from loopr.core import convert_matches_dataframe
 
 
 def test_convert_matches_accepts_neutral_schema(single_match_neutral_tables):

@@ -47,14 +47,16 @@ from typing import Any
 import polars as pl
 from scipy.stats import spearmanr
 
-from loopr import (
+from loopr.algorithms import (
+    ExposureLogOddsEngine as LooprExposureEngine,
+    TickTockEngine as LooprTickTockEngine,
+)
+from loopr.core import (
     DecayConfig as LooprDecayConfig,
     EngineConfig as LooprEngineConfig,
     ExposureLogOddsConfig as LooprExposureConfig,
-    ExposureLogOddsEngine as LooprExposureEngine,
     PageRankConfig as LooprPageRankConfig,
     TickTockConfig as LooprTickTockConfig,
-    TickTockEngine as LooprTickTockEngine,
     convert_matches_dataframe as loopr_convert_matches_dataframe,
 )
 from loopr.core import build_exposure_triplets as loopr_build_exposure_triplets

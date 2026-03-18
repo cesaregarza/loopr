@@ -244,7 +244,6 @@ class ExposureLogOddsEngine:
             pl.DataFrame(
                 {
                     "id": node_ids,
-                    "player_rank": scores,
                     "score": scores,
                     "win_pr": win_pagerank,
                     "loss_pr": loss_pagerank,
@@ -252,7 +251,9 @@ class ExposureLogOddsEngine:
                 }
             )
             .filter(pl.Series("active", mask))
-            .sort("player_rank", descending=True)
+            .sort("score", descending=True)
+            .with_row_index("player_rank", offset=1)
+            .with_columns(pl.col("player_rank").cast(pl.Int64))
         )
         stage_timings["result_assembly"] = time.perf_counter() - stage_start
 

@@ -95,12 +95,8 @@ This is the baseline that later variants should be compared against.
 Use this when you want to isolate the effect of the more coupled ingredients.
 
 ```python
-from loopr import (
-    DecayConfig,
-    EngineConfig,
-    ExposureLogOddsConfig,
-    LOOPREngine,
-)
+from loopr import ExposureLogOddsConfig, LOOPREngine
+from loopr.core import DecayConfig, EngineConfig
 
 config = ExposureLogOddsConfig(
     decay=DecayConfig(half_life_days=0.0),

@@ -1,3 +1,6 @@
+import polars as pl
+import pytest
+
 from loopr.core.preparation import (
     group_team_members,
     participants_by_tournament,
@@ -136,3 +139,62 @@ def test_prepare_row_edge_inputs_accepts_grouped_rosters(
 
     assert row_inputs.edges.height == 4
     assert set(row_inputs.node_ids) == {1, 2, 5, 6}
+
+
+def test_resolve_match_participants_rejects_unmapped_appearances(
+    single_match_neutral_tables,
+):
+    inputs = prepare_rank_inputs(
+        single_match_neutral_tables["matches"],
+        single_match_neutral_tables["participants"],
+    )
+    appearances = pl.DataFrame(
+        {
+            "tournament_id": [999],
+            "match_id": [1],
+            "user_id": [9999],
+        }
+    )
+    weighted = prepare_weighted_matches(
+        inputs.matches,
+        tournament_influence={},
+        now_timestamp=NOW,
+        decay_rate=0.0,
+        beta=0.0,
+    )
+
+    with pytest.raises(ValueError, match="Could not infer group_id"):
+        resolve_match_participants(
+            weighted,
+            inputs.participants,
+            appearances=appearances,
+            include_share=True,
+        )
+
+
+def test_resolve_match_participants_rejects_missing_team_rosters(
+    single_match_neutral_tables,
+):
+    inputs = prepare_rank_inputs(
+        single_match_neutral_tables["matches"],
+        single_match_neutral_tables["participants"].filter(
+            pl.col("group_id") != 11
+        ),
+    )
+    weighted = prepare_weighted_matches(
+        inputs.matches,
+        tournament_influence={},
+        now_timestamp=NOW,
+        decay_rate=0.0,
+        beta=0.0,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Could not resolve winner/loser participants",
+    ):
+        resolve_match_participants(
+            weighted,
+            inputs.participants,
+            include_share=True,
+        )

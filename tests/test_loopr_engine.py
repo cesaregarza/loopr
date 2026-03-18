@@ -11,7 +11,10 @@ def test_loopr_engine_ranks_entities_with_neutral_schema(multi_event_neutral_tab
     assert "entity_id" in rankings.columns
     assert rankings.height > 0
     assert "player_rank" in rankings.columns
-    assert rankings["player_rank"].is_sorted(descending=True)
+    assert rankings["score"].is_sorted(descending=True)
+    assert rankings["player_rank"].to_list() == list(
+        range(1, rankings.height + 1)
+    )
     assert engine.last_result is not None
     assert engine.last_result.stage_timings is not None
     assert engine.last_result.stage_timings["total"] > 0.0

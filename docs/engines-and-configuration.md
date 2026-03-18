@@ -86,11 +86,10 @@ The main configuration dataclasses are:
 ## Example Configuration
 
 ```python
-from loopr import (
+from loopr import ExposureLogOddsConfig, LOOPREngine
+from loopr.core import (
     DecayConfig,
     EngineConfig,
-    ExposureLogOddsConfig,
-    LOOPREngine,
     PageRankConfig,
     TickTockConfig,
 )

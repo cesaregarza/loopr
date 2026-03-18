@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loopr-ranking"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Domain-agnostic LOOPR ranking engine library"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,7 +32,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = [
+    "build>=1.2",
+    "pytest>=8.0",
+    "twine>=6.0",
+]
 accel = ["numba>=0.60"]
 
 [project.scripts]
@@ -40,6 +44,9 @@ loopr = "loopr.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "loopr._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -8,14 +8,14 @@ import numpy as np
 import polars as pl
 import pytest
 
-from loopr import (
-    ExposureLogOddsConfig,
-    LOOPREngine,
+from loopr import ExposureLogOddsConfig, LOOPREngine
+from loopr.algorithms import TTLEngine, TickTockEngine
+from loopr.core.config import (
+    DecayConfig,
+    EngineConfig,
+    PageRankConfig,
     TickTockConfig,
-    TickTockEngine,
-    TTLEngine,
 )
-from loopr.core.config import DecayConfig, EngineConfig, PageRankConfig
 
 NOW = 1_700_000_000.0
 DAY = 86400.0

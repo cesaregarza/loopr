@@ -1,4 +1,5 @@
-from loopr import LOOPREngine, TTLEngine, TickTockEngine, prepare_rank_inputs
+from loopr import LOOPREngine, prepare_rank_inputs
+from loopr.algorithms import TTLEngine, TickTockEngine
 
 
 def test_prepare_rank_inputs_returns_explicit_container(single_match_neutral_tables):
