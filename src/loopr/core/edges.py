@@ -204,6 +204,7 @@ def _build_team_edges_normalized(
         now_timestamp,
         decay_rate,
         beta,
+        legacy_timestamp_fill_after_influence=True,
     )
     return build_team_edge_dataframe(weighted)
 

@@ -204,6 +204,7 @@ def _attach_weight_columns(
     beta: float,
     *,
     timestamp_column: str | None = None,
+    legacy_timestamp_fill_after_influence: bool = False,
 ) -> pl.DataFrame:
     if tournament_influence:
         strength_dataframe = pl.DataFrame(
@@ -218,6 +219,28 @@ def _attach_weight_columns(
             how="left",
             coalesce=True,
         ).with_columns(pl.col("tournament_strength").fill_null(1.0))
+
+        if legacy_timestamp_fill_after_influence:
+            # Legacy Sendou edge-building filled nulls after the influence
+            # join, which turns missing timestamps into 1.0 before the later
+            # coalesce. Exposure conversion does not do this, so keep it
+            # opt-in for the row/team edge parity paths only.
+            fill_columns = {
+                column_name
+                for column_name in (
+                    "last_game_finished_at",
+                    "match_created_at",
+                    timestamp_column,
+                )
+                if column_name is not None and column_name in match_data.columns
+            }
+            if fill_columns:
+                match_data = match_data.with_columns(
+                    [
+                        pl.col(column_name).fill_null(1.0).alias(column_name)
+                        for column_name in sorted(fill_columns)
+                    ]
+                )
     else:
         match_data = match_data.with_columns(
             pl.lit(1.0).alias("tournament_strength")
@@ -265,6 +288,7 @@ def prepare_weighted_matches(
     beta: float,
     *,
     timestamp_column: str | None = None,
+    legacy_timestamp_fill_after_influence: bool = False,
 ) -> WeightedMatches:
     """Filter byes, resolve timestamps, join influence, and compute weights."""
     filter_expression = (
@@ -286,6 +310,7 @@ def prepare_weighted_matches(
         decay_rate,
         beta,
         timestamp_column=timestamp_column,
+        legacy_timestamp_fill_after_influence=legacy_timestamp_fill_after_influence,
     )
     return WeightedMatches(match_data)
 
@@ -714,6 +739,7 @@ def prepare_row_edge_inputs(
         decay_rate,
         beta,
         timestamp_column=timestamp_column,
+        legacy_timestamp_fill_after_influence=True,
     )
     resolved = resolve_match_participants(
         weighted,
