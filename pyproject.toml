@@ -19,6 +19,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
+[project.scripts]
+loopr = "loopr.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

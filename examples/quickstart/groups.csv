@@ -1,0 +1,17 @@
+event_id,group_id,group_name
+1,101,S1 Comets
+1,102,S1 Foxes
+1,103,S1 Kings
+1,104,S1 Lynx
+2,201,S2 Comets
+2,202,S2 Foxes
+2,203,S2 Kings
+2,204,S2 Lynx
+3,301,U1 Comets
+3,302,U1 Foxes
+3,303,U1 Kings
+3,304,U1 Lynx
+4,401,U2 Comets
+4,402,U2 Foxes
+4,403,U2 Kings
+4,404,U2 Lynx

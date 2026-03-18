@@ -34,14 +34,37 @@ Requires Python 3.10+.
 
 ## Quick Start
 
+Command line:
+
+```bash
+loopr rank \
+  --matches examples/quickstart/matches.csv \
+  --participants examples/quickstart/participants.csv \
+  --appearances examples/quickstart/appearances.csv \
+  --output rankings.csv
+```
+
+If you do not want to install the console script yet:
+
+```bash
+python -m loopr rank \
+  --matches examples/quickstart/matches.csv \
+  --participants examples/quickstart/participants.csv \
+  --appearances examples/quickstart/appearances.csv \
+  --output rankings.csv
+```
+
+Python:
+
 ```python
 import polars as pl
 
 from loopr import rank_entities
 
-matches = pl.read_csv("matches.csv")
-participants = pl.read_csv("participants.csv")
-appearances = pl.read_csv("appearances.csv")
+matches = pl.read_csv("examples/quickstart/matches.csv")
+participants = pl.read_csv("examples/quickstart/participants.csv")
+appearances = pl.read_csv("examples/quickstart/appearances.csv")
+entities = pl.read_csv("examples/quickstart/entities.csv")
 
 rankings = rank_entities(
     matches,
@@ -49,7 +72,11 @@ rankings = rank_entities(
     appearances=appearances,
 )
 
-print(rankings.select(["entity_id", "score", "exposure"]).head(10))
+print(
+    rankings.join(entities, on="entity_id")
+    .select(["entity_id", "entity_name", "score", "exposure"])
+    .head(10)
+)
 ```
 
 If your spreadsheets look like this, you are on the happy path.
@@ -84,6 +111,14 @@ If your spreadsheets look like this, you are on the happy path.
 
 If you omit `appearances`, `loopr` assumes the full event-level group roster
 participated in each result.
+
+The example files shown above live in
+[`examples/quickstart/`](examples/quickstart/).
+They are generated from a deterministic simulator with:
+
+```bash
+python -m loopr.example_data --output-dir examples/quickstart
+```
 
 ## Recommended Defaults
 
@@ -145,6 +180,7 @@ played in a result instead of assuming the full roster participated.
 For published usage, prefer these as the supported surface:
 
 - `rank_entities(...)`
+- `loopr rank`
 - `prepare_rank_inputs(...)`
 - `LOOPREngine`
 - `ExposureLogOddsConfig`
