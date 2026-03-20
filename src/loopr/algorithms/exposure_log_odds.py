@@ -22,12 +22,31 @@ from loopr.core import (
     build_exposure_triplets,
     pagerank_from_adjacency,
 )
+from loopr.core.connectivity import (
+    analyze_graph_connectivity,
+    filter_resolved_matches_to_entities,
+)
 from loopr.core.logging import get_logger
-from loopr.core.preparation import group_team_members, prepare_exposure_graph
+from loopr.core.preparation import (
+    group_team_members,
+    prepare_graph_inputs,
+    prepare_weighted_matches,
+    resolve_match_participants,
+)
 from loopr.schema import prepare_rank_inputs
 
 if TYPE_CHECKING:
     from loopr.analysis.loo_analyzer import LOOAnalyzer
+
+
+COMPONENT_POLICY_KEEP_LARGEST = "keep_largest"
+COMPONENT_POLICY_ALLOW = "allow"
+COMPONENT_POLICY_ERROR = "error"
+VALID_COMPONENT_POLICIES = {
+    COMPONENT_POLICY_KEEP_LARGEST,
+    COMPONENT_POLICY_ALLOW,
+    COMPONENT_POLICY_ERROR,
+}
 
 
 class ExposureLogOddsEngine:
@@ -66,6 +85,38 @@ class ExposureLogOddsEngine:
         self._loo_players_df: pl.DataFrame | None = None
         self._converted_matches_df: pl.DataFrame | None = None
         self.last_stage_timings: dict[str, float] | None = None
+        self.last_connectivity_report: dict[str, Any] | None = None
+
+    def _connectivity_message(
+        self,
+        report: Any,
+        *,
+        component_policy: str,
+        kept_match_count: int,
+        total_match_count: int,
+    ) -> str:
+        largest_share = report.largest_component_share_fraction or 0.0
+        dropped_match_count = max(0, total_match_count - kept_match_count)
+        base = (
+            "Resolved comparison graph has "
+            f"{report.component_count} disconnected components. "
+            f"Largest component retains {largest_share:.1%} of share mass."
+        )
+        if component_policy == COMPONENT_POLICY_KEEP_LARGEST:
+            return (
+                f"{base} Keeping only the largest component dropped "
+                f"{dropped_match_count} resolved matches and "
+                f"{report.total_entity_count - report.largest_component_entity_count} entities."
+            )
+        if component_policy == COMPONENT_POLICY_ALLOW:
+            return (
+                f"{base} Proceeding with all components means cross-component "
+                "ordering is not data-supported."
+            )
+        return (
+            f"{base} Ranking with component_policy='error' is disabled until "
+            "the data is filtered or repaired."
+        )
 
     def _rank_internal(
         self,
@@ -74,6 +125,7 @@ class ExposureLogOddsEngine:
         tournament_influence: dict[int, float] | None = None,
         *,
         appearances: pl.DataFrame | None = None,
+        component_policy: str = COMPONENT_POLICY_KEEP_LARGEST,
     ) -> pl.DataFrame:
         """Rank prepared internal inputs using the Exposure Log-Odds algorithm.
 
@@ -85,10 +137,17 @@ class ExposureLogOddsEngine:
         Returns:
             DataFrame containing entity rankings.
         """
+        if component_policy not in VALID_COMPONENT_POLICIES:
+            raise ValueError(
+                "component_policy must be one of: "
+                + ", ".join(sorted(VALID_COMPONENT_POLICIES))
+            )
+
         start_time = time.perf_counter()
         stage_timings: dict[str, float] = {}
         participants_df = participants
         stage_timings["input_normalization"] = 0.0
+        self.last_connectivity_report = None
 
         # 1) Get active entities and tournament influences via tick-tock.
         #    Union them with entities who actually appear in matches so subs are kept.
@@ -112,28 +171,114 @@ class ExposureLogOddsEngine:
         self.logger.info("Converting matches...")
         stage_start = time.perf_counter()
         roster_source = group_team_members(participants_df)
-        graph_inputs = prepare_exposure_graph(
+        weighted_matches = prepare_weighted_matches(
             matches,
-            participants_df,
             tournament_influence or {},
             self.clock.now,
             self.config.decay.decay_rate,
             self.config.engine.beta,
+        )
+        resolved = resolve_match_participants(
+            weighted_matches,
+            participants_df,
             rosters=roster_source,
             appearances=appearances,
-            active_entities=active_entities,
+            include_share=True,
+        )
+        if resolved.matches.is_empty():
+            self.logger.warning(
+                "No valid matches after conversion; returning empty result."
+            )
+            stage_timings["match_preparation"] = time.perf_counter() - stage_start
+            stage_timings["total"] = time.perf_counter() - start_time
+            self.last_stage_timings = stage_timings
+            self.last_connectivity_report = {
+                "component_policy": component_policy,
+                "component_count": 0,
+                "largest_component_share_fraction": None,
+                "largest_component_weight_fraction": None,
+                "largest_component_node_fraction": None,
+                "disconnected_share_fraction": None,
+                "warning_message": None,
+                "kept_match_count": 0,
+                "dropped_match_count": 0,
+                "kept_entity_count": 0,
+                "dropped_entity_count": 0,
+            }
+            return pl.DataFrame()
+
+        connectivity_graph = prepare_graph_inputs(resolved)
+        connectivity_report = analyze_graph_connectivity(connectivity_graph)
+        resolved_matches = resolved.matches
+        filtered_active_entities = active_entities
+        warning_message: str | None = None
+        if connectivity_report.is_disconnected:
+            if component_policy == COMPONENT_POLICY_ERROR:
+                raise ValueError(
+                    self._connectivity_message(
+                        connectivity_report,
+                        component_policy=component_policy,
+                        kept_match_count=resolved.matches.height,
+                        total_match_count=resolved.matches.height,
+                    )
+                )
+            if component_policy == COMPONENT_POLICY_KEEP_LARGEST:
+                resolved_matches = filter_resolved_matches_to_entities(
+                    resolved_matches,
+                    connectivity_report.largest_component_entity_ids,
+                )
+                kept_ids = set(connectivity_report.largest_component_entity_ids)
+                filtered_active_entities = [
+                    entity_id
+                    for entity_id in active_entities
+                    if entity_id in kept_ids
+                ]
+
+            warning_message = self._connectivity_message(
+                connectivity_report,
+                component_policy=component_policy,
+                kept_match_count=resolved_matches.height,
+                total_match_count=resolved.matches.height,
+            )
+            self.logger.warning(warning_message)
+
+        graph_inputs = prepare_graph_inputs(
+            resolved_matches,
+            active_entities=filtered_active_entities,
         )
         mdf = graph_inputs.matches
         self._converted_matches_df = mdf
         stage_timings["match_preparation"] = time.perf_counter() - stage_start
-        if mdf.is_empty():
-            self.logger.warning(
-                "No valid matches after conversion; returning empty result."
-            )
-            stage_timings["total"] = time.perf_counter() - start_time
-            self.last_stage_timings = stage_timings
-            return pl.DataFrame()
-
+        kept_entity_count = (
+            connectivity_report.largest_component_entity_count
+            if connectivity_report.is_disconnected
+            and component_policy == COMPONENT_POLICY_KEEP_LARGEST
+            else connectivity_report.total_entity_count
+        )
+        dropped_entity_count = (
+            connectivity_report.total_entity_count - kept_entity_count
+        )
+        self.last_connectivity_report = {
+            "component_policy": component_policy,
+            "component_count": connectivity_report.component_count,
+            "largest_component_share_fraction": (
+                connectivity_report.largest_component_share_fraction
+            ),
+            "largest_component_weight_fraction": (
+                connectivity_report.largest_component_weight_fraction
+            ),
+            "largest_component_node_fraction": (
+                connectivity_report.largest_component_node_fraction
+            ),
+            "disconnected_share_fraction": (
+                connectivity_report.disconnected_share_fraction
+            ),
+            "warning_message": warning_message,
+            "kept_match_count": mdf.height,
+            "dropped_match_count": max(0, resolved.matches.height - mdf.height),
+            "kept_entity_count": kept_entity_count,
+            "dropped_entity_count": dropped_entity_count,
+        }
         entity_metrics = graph_inputs.entity_metrics
 
         # 3) Use the shared graph-prep artifacts for node setup.
@@ -290,6 +435,7 @@ class ExposureLogOddsEngine:
         tournament_influence: dict[int, float] | None = None,
         *,
         appearances: pl.DataFrame | None = None,
+        component_policy: str = COMPONENT_POLICY_KEEP_LARGEST,
     ) -> pl.DataFrame:
         """Validate neutral inputs and return `entity_id` rankings."""
         inputs = prepare_rank_inputs(matches, participants, appearances)
@@ -298,6 +444,7 @@ class ExposureLogOddsEngine:
             inputs.participants,
             tournament_influence,
             appearances=inputs.appearances,
+            component_policy=component_policy,
         )
         if result.is_empty():
             return result

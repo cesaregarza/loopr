@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import polars as pl
 
 from loopr.algorithms import LOOPREngine
@@ -17,6 +19,7 @@ def rank_entities(
     now_ts: float | None = None,
     clock: Clock | None = None,
     tournament_influence: dict[int, float] | None = None,
+    component_policy: str = "keep_largest",
 ) -> pl.DataFrame:
     """Rank entities from neutral-schema input tables.
 
@@ -30,9 +33,15 @@ def rank_entities(
     """
 
     engine = LOOPREngine(config=config, now_ts=now_ts, clock=clock)
-    return engine.rank_entities(
+    rankings = engine.rank_entities(
         matches,
         participants,
         tournament_influence,
         appearances=appearances,
+        component_policy=component_policy,
     )
+    report = engine.last_connectivity_report or {}
+    warning_message = report.get("warning_message")
+    if warning_message:
+        warnings.warn(warning_message, stacklevel=2)
+    return rankings

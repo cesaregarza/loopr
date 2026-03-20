@@ -158,6 +158,12 @@ For most users, the right starting point is:
 - default configuration
 - `appearances` included whenever available
 
+By default, `rank_entities(...)` keeps only the largest connected component of
+the resolved comparison graph. If the graph is disconnected, LOOPR warns and
+drops the smaller disconnected pieces before ranking. Use
+`component_policy="allow"` to keep all components anyway or
+`component_policy="error"` to fail fast instead.
+
 Treat the output as a ranking signal, not a calibrated probability-like score.
 Tune only after you have an external validation target or a clear operational
 reason. The deeper guidance lives in the repository docs under
@@ -255,7 +261,9 @@ under `docs/`, including:
 ## Common Next Steps
 
 - Use `assess_dataset_fit(...)` before serious tuning when you want a quick read on appearance coverage, roster fallback risk, and participant/appearance alignment.
-  It also checks whether the resolved entity comparison graph is connected enough to support a global ranking.
+  It also reports whether the resolved entity comparison graph is disconnected,
+  how much share mass sits outside the largest component, and whether ranking
+  the dataset as-is is a bad fit for LOOPR.
 - Use `prepare_rank_inputs(...)` when you want schema validation before ranking
   or when debugging normalized inputs.
 - Pass `appearances` when match-level participation differs from the stored

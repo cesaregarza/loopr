@@ -56,6 +56,12 @@ def _build_parser() -> argparse.ArgumentParser:
     rank_parser.add_argument("--participants", required=True, type=Path)
     rank_parser.add_argument("--appearances", type=Path)
     rank_parser.add_argument(
+        "--component-policy",
+        choices=["keep_largest", "allow", "error"],
+        default="keep_largest",
+        help="How to handle disconnected comparison graphs.",
+    )
+    rank_parser.add_argument(
         "--output",
         type=Path,
         help="Output .csv or .parquet path. Defaults to CSV on stdout.",
@@ -78,6 +84,7 @@ def _run_rank_command(args: argparse.Namespace) -> int:
         participants,
         appearances=appearances,
         now_ts=args.now_ts,
+        component_policy=args.component_policy,
     )
 
     if args.output is not None:

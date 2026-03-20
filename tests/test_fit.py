@@ -1,6 +1,8 @@
 import polars as pl
+import pytest
 
 from loopr import assess_dataset_fit
+from loopr.fit import DatasetFitCheck, DatasetFitReport
 
 
 def test_assess_dataset_fit_reports_good_fit_with_full_appearances(
@@ -73,7 +75,7 @@ def test_assess_dataset_fit_flags_missing_team_rosters(
 
     assert report.overall_status == "poor_fit"
     assert any(
-        check.name == "team_rosters" and check.status == "warn"
+        check.name == "team_rosters" and check.status == "fail"
         for check in report.checks
     )
     assert any(
@@ -101,11 +103,11 @@ def test_assess_dataset_fit_allows_tiny_tail_of_unresolved_matches():
 
     report = assess_dataset_fit(matches, participants)
 
-    assert report.overall_status == "good_fit"
+    assert report.overall_status == "poor_fit"
     assert report.metrics["resolvable_match_count"] == 100
     assert report.metrics["entity_graph_component_count"] == 1
     assert any(
-        check.name == "team_rosters" and check.status == "pass"
+        check.name == "team_rosters" and check.status == "fail"
         for check in report.checks
     )
     assert any(
@@ -133,11 +135,11 @@ def test_assess_dataset_fit_warns_on_partial_resolvable_coverage():
 
     report = assess_dataset_fit(matches, participants)
 
-    assert report.overall_status == "usable_with_caution"
+    assert report.overall_status == "poor_fit"
     assert report.metrics["resolvable_match_count"] == 4
     assert report.metrics["entity_graph_component_count"] == 1
     assert any(
-        check.name == "team_rosters" and check.status == "warn"
+        check.name == "team_rosters" and check.status == "fail"
         for check in report.checks
     )
     assert any(
@@ -206,3 +208,50 @@ def test_assess_dataset_fit_flags_fragmented_entity_graph():
         check.name == "entity_graph_connectivity" and check.status == "fail"
         for check in report.checks
     )
+
+
+def test_assess_dataset_fit_warns_when_disconnect_is_tiny_share_tail():
+    matches = pl.DataFrame(
+        {
+            "event_id": ([1] * 1000) + [2],
+            "match_id": list(range(1001)),
+            "winner_id": ([100] * 1000) + [300],
+            "loser_id": ([200] * 1000) + [400],
+        }
+    )
+    participants = pl.DataFrame(
+        {
+            "event_id": ([1] * 2) + ([2] * 2),
+            "group_id": [100, 200, 300, 400],
+            "entity_id": [1, 2, 3, 4],
+        }
+    )
+
+    report = assess_dataset_fit(matches, participants)
+
+    assert report.overall_status == "usable_with_caution"
+    assert report.metrics["entity_graph_component_count"] == 2
+    assert report.metrics["entity_graph_disconnected_share_fraction"] == pytest.approx(
+        1 / 1001
+    )
+    assert any(
+        check.name == "entity_graph_connectivity" and check.status == "warn"
+        for check in report.checks
+    )
+
+
+def test_dataset_fit_report_to_dataframe_handles_mixed_value_types():
+    report = DatasetFitReport(
+        overall_status="usable_with_caution",
+        checks=(
+            DatasetFitCheck("one", "pass", "integer", 1),
+            DatasetFitCheck("two", "warn", "float", 0.5),
+            DatasetFitCheck("three", "pass", "none", None),
+        ),
+        metrics={},
+    )
+
+    frame = report.to_dataframe()
+
+    assert frame.schema["value"] == pl.Float64
+    assert frame["value"].to_list() == [1.0, 0.5, None]

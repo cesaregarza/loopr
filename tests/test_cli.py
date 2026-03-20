@@ -166,3 +166,48 @@ def test_cli_version_reports_package_version(capsys):
 
     assert excinfo.value.code == 0
     assert f"loopr {__version__}" in capsys.readouterr().out
+
+
+def test_cli_rank_warns_and_keeps_largest_component(
+    tmp_path: Path,
+    capsys,
+):
+    matches = pl.DataFrame(
+        {
+            "event_id": [1, 2],
+            "match_id": [10, 20],
+            "winner_id": [100, 300],
+            "loser_id": [200, 400],
+        }
+    )
+    participants = pl.DataFrame(
+        {
+            "event_id": [1, 1, 2, 2],
+            "group_id": [100, 200, 300, 400],
+            "entity_id": [1, 2, 3, 4],
+        }
+    )
+    matches_path = tmp_path / "matches.csv"
+    participants_path = tmp_path / "participants.csv"
+    output_path = tmp_path / "rankings.csv"
+    matches.write_csv(matches_path)
+    participants.write_csv(participants_path)
+
+    with pytest.warns(UserWarning, match="disconnected components"):
+        exit_code = main(
+            [
+                "rank",
+                "--matches",
+                str(matches_path),
+                "--participants",
+                str(participants_path),
+                "--output",
+                str(output_path),
+                "--now-ts",
+                "1700000000",
+            ]
+        )
+
+    assert exit_code == 0
+    rankings = pl.read_csv(output_path)
+    assert set(rankings["entity_id"].to_list()) == {1, 2}

@@ -7,6 +7,12 @@ from typing import Any
 
 import polars as pl
 
+from loopr.core.connectivity import analyze_graph_connectivity
+from loopr.core.preparation import (
+    prepare_graph_inputs,
+    prepare_weighted_matches,
+    resolve_match_participants,
+)
 from loopr.schema import prepare_rank_inputs
 
 PASS = "pass"
@@ -38,7 +44,17 @@ class DatasetFitReport:
             {
                 "check": [check.name for check in self.checks],
                 "status": [check.status for check in self.checks],
-                "value": [check.value for check in self.checks],
+                "value": pl.Series(
+                    "value",
+                    [
+                        None
+                        if check.value is None
+                        else float(check.value)
+                        for check in self.checks
+                    ],
+                    dtype=pl.Float64,
+                    strict=False,
+                ),
                 "detail": [check.detail for check in self.checks],
             }
         )
@@ -135,121 +151,6 @@ def _match_team_coverage(
     return covered_match_teams.height / match_teams.height
 
 
-def _resolved_matches_for_connectivity(
-    matches: pl.DataFrame,
-    participants: pl.DataFrame,
-    grouped_appearances: pl.DataFrame | None,
-) -> pl.DataFrame:
-    winner_rosters = (
-        participants.select(["tournament_id", "team_id", "user_id"])
-        .group_by(["tournament_id", "team_id"])
-        .agg(pl.col("user_id").alias("winner_roster"))
-        .rename({"team_id": "winner_team_id"})
-    )
-    loser_rosters = (
-        participants.select(["tournament_id", "team_id", "user_id"])
-        .group_by(["tournament_id", "team_id"])
-        .agg(pl.col("user_id").alias("loser_roster"))
-        .rename({"team_id": "loser_team_id"})
-    )
-
-    resolved = matches.join(
-        winner_rosters,
-        on=["tournament_id", "winner_team_id"],
-        how="left",
-    ).join(
-        loser_rosters,
-        on=["tournament_id", "loser_team_id"],
-        how="left",
-    )
-
-    if grouped_appearances is not None and not grouped_appearances.is_empty():
-        winner_appearances = grouped_appearances.rename(
-            {"team_id": "winner_team_id", "user_id": "winner_appearance"}
-        )
-        loser_appearances = grouped_appearances.rename(
-            {"team_id": "loser_team_id", "user_id": "loser_appearance"}
-        )
-        resolved = resolved.join(
-            winner_appearances,
-            on=["tournament_id", "match_id", "winner_team_id"],
-            how="left",
-        ).join(
-            loser_appearances,
-            on=["tournament_id", "match_id", "loser_team_id"],
-            how="left",
-        )
-        resolved = resolved.with_columns(
-            [
-                pl.when(pl.col("winner_appearance").is_not_null())
-                .then(pl.col("winner_appearance"))
-                .otherwise(pl.col("winner_roster"))
-                .alias("winners"),
-                pl.when(pl.col("loser_appearance").is_not_null())
-                .then(pl.col("loser_appearance"))
-                .otherwise(pl.col("loser_roster"))
-                .alias("losers"),
-            ]
-        )
-    else:
-        resolved = resolved.with_columns(
-            [
-                pl.col("winner_roster").alias("winners"),
-                pl.col("loser_roster").alias("losers"),
-            ]
-        )
-
-    return resolved.select(["match_id", "tournament_id", "winners", "losers"])
-
-
-def _entity_graph_metrics(resolved_matches: pl.DataFrame) -> dict[str, Any]:
-    adjacency: dict[int, set[int]] = {}
-
-    for row in resolved_matches.iter_rows(named=True):
-        winners = row["winners"] or []
-        losers = row["losers"] or []
-        participants = set(winners) | set(losers)
-        for entity_id in participants:
-            adjacency.setdefault(int(entity_id), set())
-        for winner_id in winners:
-            winner = int(winner_id)
-            for loser_id in losers:
-                loser = int(loser_id)
-                adjacency[winner].add(loser)
-                adjacency[loser].add(winner)
-
-    if not adjacency:
-        return {
-            "entity_graph_component_count": 0,
-            "entity_graph_largest_component_size": 0,
-            "entity_graph_largest_component_fraction": None,
-        }
-
-    remaining = set(adjacency)
-    component_sizes: list[int] = []
-    while remaining:
-        start = remaining.pop()
-        stack = [start]
-        size = 0
-        while stack:
-            node = stack.pop()
-            size += 1
-            neighbors = adjacency[node] & remaining
-            if neighbors:
-                stack.extend(neighbors)
-                remaining.difference_update(neighbors)
-        component_sizes.append(size)
-
-    largest_component_size = max(component_sizes)
-    total_nodes = sum(component_sizes)
-    return {
-        "entity_graph_component_count": len(component_sizes),
-        "entity_graph_largest_component_size": largest_component_size,
-        "entity_graph_largest_component_fraction": largest_component_size
-        / total_nodes,
-    }
-
-
 def assess_dataset_fit(
     matches: pl.DataFrame,
     participants: pl.DataFrame,
@@ -285,6 +186,9 @@ def assess_dataset_fit(
         "entity_graph_component_count": None,
         "entity_graph_largest_component_size": None,
         "entity_graph_largest_component_fraction": None,
+        "entity_graph_largest_component_share_fraction": None,
+        "entity_graph_largest_component_weight_fraction": None,
+        "entity_graph_disconnected_share_fraction": None,
     }
 
     checks: list[DatasetFitCheck] = []
@@ -357,39 +261,14 @@ def assess_dataset_fit(
                 resolvable_fraction,
             )
         )
-    elif resolvable_fraction is not None and resolvable_fraction >= 0.99:
-        sample = _sample_rows(missing_rosters, ["match_id", "tournament_id"])
-        checks.append(
-            DatasetFitCheck(
-                "team_rosters",
-                PASS,
-                "Nearly every competitive match can be resolved to participant rosters; "
-                "a tiny tail of matches is missing team membership and can be excluded safely. "
-                f"Sample match_id/event_id pairs: {sample}",
-                resolvable_fraction,
-            )
-        )
-    elif resolvable_fraction is not None and resolvable_fraction >= 0.8:
-        sample = _sample_rows(missing_rosters, ["match_id", "tournament_id"])
-        checks.append(
-            DatasetFitCheck(
-                "team_rosters",
-                WARN,
-                "Most competitive matches can be resolved to participant rosters, "
-                "but a non-trivial tail is missing team membership. "
-                f"Sample match_id/event_id pairs: {sample}",
-                resolvable_fraction,
-            )
-        )
     else:
         sample = _sample_rows(missing_rosters, ["match_id", "tournament_id"])
         checks.append(
             DatasetFitCheck(
                 "team_rosters",
-                WARN,
-                "Many competitive matches cannot be attributed back to complete participant rosters. "
-                "That does not necessarily mean the usable subset is a bad LOOPR fit, "
-                "but it does mean the dataset likely has coverage issues. "
+                FAIL,
+                "Some competitive matches cannot be attributed back to complete participant rosters, "
+                "so LOOPR cannot rank the dataset as-is without dropping those matches. "
                 f"Sample match_id/event_id pairs: {sample}",
                 resolvable_fraction,
             )
@@ -595,18 +474,45 @@ def assess_dataset_fit(
 
     failed_checks = {check.name for check in checks if check.status == FAIL}
     if "competitive_matches" not in failed_checks:
-        resolved_matches = _resolved_matches_for_connectivity(
+        weighted_matches = prepare_weighted_matches(
             resolvable_matches,
-            prepared.participants,
-            grouped_appearances_for_connectivity,
+            tournament_influence={},
+            now_timestamp=0.0,
+            decay_rate=0.0,
+            beta=0.0,
         )
-        graph_metrics = _entity_graph_metrics(resolved_matches)
+        resolved_matches = resolve_match_participants(
+            weighted_matches,
+            prepared.participants,
+            appearances=grouped_appearances_for_connectivity,
+            include_share=True,
+        )
+        connectivity_graph = prepare_graph_inputs(resolved_matches)
+        connectivity_report = analyze_graph_connectivity(connectivity_graph)
+        graph_metrics = {
+            "entity_graph_component_count": connectivity_report.component_count,
+            "entity_graph_largest_component_size": (
+                connectivity_report.largest_component_entity_count
+            ),
+            "entity_graph_largest_component_fraction": (
+                connectivity_report.largest_component_node_fraction
+            ),
+            "entity_graph_largest_component_share_fraction": (
+                connectivity_report.largest_component_share_fraction
+            ),
+            "entity_graph_largest_component_weight_fraction": (
+                connectivity_report.largest_component_weight_fraction
+            ),
+            "entity_graph_disconnected_share_fraction": (
+                connectivity_report.disconnected_share_fraction
+            ),
+        }
         metrics.update(graph_metrics)
 
-        component_count = graph_metrics["entity_graph_component_count"]
-        largest_component_fraction = graph_metrics[
-            "entity_graph_largest_component_fraction"
-        ]
+        component_count = connectivity_report.component_count
+        disconnected_share_fraction = (
+            connectivity_report.disconnected_share_fraction
+        )
         if component_count == 0:
             checks.append(
                 DatasetFitCheck(
@@ -625,14 +531,18 @@ def assess_dataset_fit(
                     1,
                 )
             )
-        elif largest_component_fraction is not None and largest_component_fraction >= 0.8:
+        elif (
+            disconnected_share_fraction is not None
+            and disconnected_share_fraction <= 0.005
+        ):
             checks.append(
                 DatasetFitCheck(
                     "entity_graph_connectivity",
                     WARN,
-                    "Most entities live in one connected component, but some disconnected islands remain. "
-                    "Global ranking outside the main component is weaker.",
-                    largest_component_fraction,
+                    "Disconnected comparison islands remain, but they sit outside a tiny share tail. "
+                    "Keeping the largest component would retain "
+                    f"{(connectivity_report.largest_component_share_fraction or 0.0):.1%} of share mass.",
+                    connectivity_report.largest_component_share_fraction,
                 )
             )
         else:
@@ -640,8 +550,10 @@ def assess_dataset_fit(
                 DatasetFitCheck(
                     "entity_graph_connectivity",
                     FAIL,
-                    "The resolved entity comparison graph is too fragmented for a well-supported global ranking.",
-                    largest_component_fraction,
+                    "The resolved entity comparison graph is disconnected in a material way. "
+                    "Keeping the largest component would retain "
+                    f"{(connectivity_report.largest_component_share_fraction or 0.0):.1%} of share mass.",
+                    connectivity_report.largest_component_share_fraction,
                 )
             )
 
