@@ -261,6 +261,8 @@ under `docs/`, including:
 ## Common Next Steps
 
 - Use `assess_dataset_fit(...)` before serious tuning when you want a quick read on appearance coverage, roster fallback risk, and participant/appearance alignment.
+  It is a heuristic suitability check for LOOPR's global-ranking assumptions,
+  not a guarantee of ranking quality and not merely a schema or runtime-validity check.
   It also reports whether the resolved entity comparison graph is disconnected,
   how much share mass sits outside the largest component, and whether ranking
   the dataset as-is is a bad fit for LOOPR.
