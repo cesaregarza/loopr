@@ -9,6 +9,7 @@ decomposes that team-shaped evidence into entity-level rankings.
 The stable public API is:
 
 - `rank_entities(...)` for the one-shot ranking path
+- `assess_dataset_fit(...)` for checking whether a dataset matches LOOPR's main input assumptions
 - `prepare_rank_inputs(...)` for validating neutral input tables
 - `LOOPREngine` when you want engine state, diagnostics, or LOO analysis
 - `ExposureLogOddsConfig` when you need to override defaults
@@ -206,6 +207,7 @@ played in a result instead of assuming the full roster participated.
 
 For published usage, prefer these as the supported surface:
 
+- `assess_dataset_fit(...)`
 - `rank_entities(...)`
 - `loopr rank`
 - `prepare_rank_inputs(...)`
@@ -252,6 +254,8 @@ under `docs/`, including:
 
 ## Common Next Steps
 
+- Use `assess_dataset_fit(...)` before serious tuning when you want a quick read on appearance coverage, roster fallback risk, and participant/appearance alignment.
+  It also checks whether the resolved entity comparison graph is connected enough to support a global ranking.
 - Use `prepare_rank_inputs(...)` when you want schema validation before ranking
   or when debugging normalized inputs.
 - Pass `appearances` when match-level participation differs from the stored
